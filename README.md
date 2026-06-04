@@ -39,6 +39,14 @@ Sistem klasifikasi telur **on-device** (Bagus / Tidak Bagus) menggunakan kamera 
 | PSRAM | 8 MB Octal (OPI) |
 | Kamera | OV2640 2MP (onboard) |
 
+### Dimensi Board
+
+![Dimensi Board](docs/dimesion.jpg)
+
+### Skematik Rangkaian
+
+![Skematik Rangkaian](docs/schematic.jpg)
+
 ---
 
 ## Arsitektur Sistem
