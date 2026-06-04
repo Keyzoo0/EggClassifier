@@ -1,4 +1,29 @@
-# Klasifikasi Telur — ESP32-S3-CAM N16R8
+# RANCANG BANGUN ALAT KLASIFIKASI TELUR BERDASARKAN TEKSTUR CANGKANG MENGGUNAKAN ESP-32 S3 CAM BERBASIS IOT
+
+---
+
+<div align="center">
+
+## LAPORAN TUGAS AKHIR
+
+Laporan ini diajukan untuk memenuhi salah satu syarat Menyelesaikan  
+Pendidikan Program Diploma III Pada Jurusan  
+Teknik Komputer
+
+**Oleh :**
+
+**Muhammad Reka Alviandi**  
+**062330701499**
+
+**POLITEKNIK NEGERI SRIWIJAYA**  
+**PALEMBANG**  
+**2026**
+
+</div>
+
+---
+
+## Deskripsi Proyek
 
 Sistem klasifikasi telur **on-device** (Bagus / Tidak Bagus) menggunakan kamera OV2640 dan inferensi TFLite Micro langsung di ESP32-S3 tanpa koneksi cloud.
 
