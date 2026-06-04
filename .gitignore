@@ -1,0 +1,35 @@
+# PlatformIO build artifacts
+ESP32-S3-EggClassifier/.pio/
+
+# ESP-IDF auto-generated sdkconfig (source of truth ada di sdkconfig.defaults)
+ESP32-S3-EggClassifier/sdkconfig.dfrobot_firebeetle2_esp32s3
+
+# Komponen yang di-download otomatis oleh ESP-IDF Component Manager
+ESP32-S3-EggClassifier/managed_components/
+
+# VS Code auto-generated
+ESP32-S3-EggClassifier/.vscode/c_cpp_properties.json
+ESP32-S3-EggClassifier/.vscode/launch.json
+ESP32-S3-EggClassifier/.vscode/.browse.c_cpp.db*
+ESP32-S3-EggClassifier/.vscode/ipch/
+
+# Model files (akan besar, belum perlu di-track sekarang)
+ESP32-S3-EggClassifier/src/egg_model.h
+*.tflite
+*.h5
+
+# Dataset (tidak di-track di git)
+dataset/
+datasets/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+training/.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
