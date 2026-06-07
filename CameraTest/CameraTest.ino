@@ -1,26 +1,31 @@
 /*
  * Phase 1 — Camera Test
- * Board  : DFRobot FireBeetle 2 ESP32-S3 N16R8
+ * Board  : DFRobot FireBeetle 2 ESP32-S3 N16R8 (v1.0)
  * Tujuan : Verifikasi kamera OV2640 berfungsi sebelum lanjut ke training
+ *
+ * Library yang harus diinstall di Arduino IDE:
+ *   - DFRobot_AXP313A  → Library Manager, cari "DFRobot AXP313A"
  *
  * Arduino IDE Board Settings:
  *   Board           : ESP32S3 Dev Module
  *   Flash Size      : 16MB (128Mb)
- *   Partition Scheme: Default 4MB with spiffs (cukup untuk Phase 1)
+ *   Partition Scheme: Default 4MB with spiffs
  *   PSRAM           : Disabled
  *   CPU Frequency   : 240MHz
- *   USB CDC On Boot : Enabled  ← WAJIB agar Serial muncul di monitor
+ *   USB CDC On Boot : Enabled  ← WAJIB agar Serial muncul
  *   Upload Speed    : 921600
  */
 
+#include <Wire.h>
+#include "DFRobot_AXP313A.h"
 #include "esp_camera.h"
 
 // --- Pin Mapping FireBeetle 2 ESP32-S3 N16R8 ---
 #define CAM_PIN_PWDN    -1
 #define CAM_PIN_RESET   -1
 #define CAM_PIN_XCLK    45
-#define CAM_PIN_SIOD     1
-#define CAM_PIN_SIOC     2
+#define CAM_PIN_SIOD     1   // SDA — shared dengan AXP313A I2C
+#define CAM_PIN_SIOC     2   // SCL — shared dengan AXP313A I2C
 #define CAM_PIN_D7      48
 #define CAM_PIN_D6      46
 #define CAM_PIN_D5       8
@@ -32,6 +37,24 @@
 #define CAM_PIN_VSYNC    6
 #define CAM_PIN_HREF    42
 #define CAM_PIN_PCLK     5
+
+DFRobot_AXP313A axp;
+
+bool initPower() {
+  // AXP313A menggunakan I2C yang sama dengan SCCB kamera (SDA=1, SCL=2)
+  Wire.begin(CAM_PIN_SIOD, CAM_PIN_SIOC);
+
+  if (axp.begin() != 0) {
+    Serial.println("[ERROR] AXP313A tidak terdeteksi!");
+    Serial.println("  Pastikan board FireBeetle 2 v1.0 dan library terinstall.");
+    return false;
+  }
+
+  axp.enableCameraPower(axp.eOV2640);
+  delay(100); // tunggu power supply stabil
+  Serial.println("[OK] AXP313A: power kamera aktif");
+  return true;
+}
 
 bool initCamera() {
   camera_config_t config;
@@ -58,15 +81,12 @@ bool initCamera() {
   config.frame_size    = FRAMESIZE_QVGA;  // 320x240
   config.jpeg_quality  = 12;
   config.fb_count      = 1;
-  config.fb_location   = CAMERA_FB_IN_DRAM; // PSRAM dinonaktifkan
+  config.fb_location   = CAMERA_FB_IN_DRAM;
   config.grab_mode     = CAMERA_GRAB_LATEST;
 
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
     Serial.printf("[ERROR] Camera init gagal: 0x%x\n", err);
-    Serial.println("  Kemungkinan penyebab:");
-    Serial.println("  - Kabel FPC kamera belum terpasang");
-    Serial.println("  - USB CDC On Boot belum di-Enable di board settings");
     return false;
   }
   return true;
@@ -74,22 +94,29 @@ bool initCamera() {
 
 void setup() {
   Serial.begin(115200);
-  delay(2000); // beri waktu Serial monitor terhubung
+  delay(2000);
 
-  Serial.println("\n=== FireBeetle 2 ESP32-S3 N16R8 — Phase 1 Camera Test ===");
+  Serial.println("\n=== FireBeetle 2 ESP32-S3 N16R8 v1.0 — Phase 1 Camera Test ===");
   Serial.printf("Free heap : %lu bytes\n", (unsigned long)ESP.getFreeHeap());
-  Serial.printf("PSRAM size: %lu bytes\n", (unsigned long)ESP.getPsramSize());
 
-  Serial.println("\nInisialisasi kamera...");
+  // Step 1: nyalakan power kamera via AXP313A (wajib untuk v1.0)
+  Serial.println("\n[1/2] Inisialisasi AXP313A power management...");
+  if (!initPower()) {
+    Serial.println("\n[GAGAL] Tidak bisa lanjut. Install library DFRobot_AXP313A.");
+    return;
+  }
 
+  // Step 2: inisialisasi kamera
+  Serial.println("[2/2] Inisialisasi kamera OV2640...");
   if (!initCamera()) {
-    Serial.println("\n[GAGAL] Tidak bisa lanjut. Periksa koneksi dan board settings.");
+    Serial.println("\n[GAGAL] Camera init error. Periksa koneksi FPC kamera.");
     return;
   }
 
   delay(300); // tunggu AWB OV2640 stabil
-
   Serial.println("[OK] Kamera siap!\n");
+
+  // Step 3: capture test
   Serial.println("Mulai capture 5 frame test...");
   Serial.println("-------------------------------------------");
 
@@ -124,6 +151,5 @@ void setup() {
 }
 
 void loop() {
-  // Phase 1 hanya test sekali di setup()
   delay(10000);
 }
