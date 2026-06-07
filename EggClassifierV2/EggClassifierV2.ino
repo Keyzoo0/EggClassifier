@@ -46,6 +46,9 @@
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
 #include "tensorflow/lite/micro/micro_error_reporter.h"
 #include "tensorflow/lite/schema/schema_generated.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/semphr.h>
 
 // ── Credentials ───────────────────────────────────────────────
 #define WIFI_SSID  "Warmindo Samndut Suhat. 4G"
@@ -110,9 +113,22 @@ int  sdGoodCount  = 0;
 int  sdBadCount   = 0;
 
 // Flags
-bool     classifying  = false;
-bool     pendingRestart = false;
-uint32_t restartAt    = 0;
+volatile bool classifying    = false;   // volatile: dibaca dari 2 core
+bool          pendingRestart = false;
+uint32_t      restartAt      = 0;
+
+// Dual-core: inferensi berjalan di Core 0, HTTP di Core 1
+struct InferResult {
+  float    score;
+  bool     good;
+  uint32_t time_ms;
+  bool     ok;
+  char     err[32];
+};
+static SemaphoreHandle_t inferTrigSem    = NULL;  // Core1→Core0: mulai
+static SemaphoreHandle_t inferDoneSem    = NULL;  // Core0→Core1: selesai
+static TaskHandle_t      inferTaskHandle = NULL;
+static InferResult       inferResult;
 
 File uploadFile;
 
@@ -281,6 +297,7 @@ void serveFile(const char* path, const char* mime) {
 }
 void handleRoot()  { serveFile("/index.html", "text/html"); }
 void handleAppJS() { serveFile("/app.js",     "application/javascript"); }
+void handleCSS()   { serveFile("/style.css",  "text/css"); }
 
 // ─────────────────────────────────────────────────────────────
 // HTTP: capture JPEG live
@@ -369,96 +386,144 @@ void handleModelInfo() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// HTTP: inferensi
+// Core 0 — inference task
+// Menunggu inferTrigSem dari Core 1, lakukan grab+decode+Invoke,
+// simpan hasil di inferResult, kirim inferDoneSem ke Core 1.
+// ─────────────────────────────────────────────────────────────
+void inferenceTask(void* pv) {
+  (void)pv;
+  while (true) {
+    xSemaphoreTake(inferTrigSem, portMAX_DELAY);
+
+    InferResult r = {};
+
+    // Buang 2 frame awal agar AWB stabil (kamera sudah di QQVGA oleh Core 1)
+    for (int i = 0; i < 2; i++) {
+      camera_fb_t* d = esp_camera_fb_get();
+      if (d) esp_camera_fb_return(d);
+      vTaskDelay(pdMS_TO_TICKS(40));
+    }
+
+    camera_fb_t* fb = esp_camera_fb_get();
+
+    // Kembalikan framesize ke VGA sebelum decode agar live preview siap cepat
+    sensor_t* s = esp_camera_sensor_get();
+    if (s) s->set_framesize(s, FRAMESIZE_VGA);
+
+    if (!fb) {
+      snprintf(r.err, sizeof(r.err), "camera_failed");
+      inferResult = r;
+      xSemaphoreGive(inferDoneSem);
+      continue;
+    }
+
+    // ── Decode JPEG → RGB888 di PSRAM ────────────────────────
+    uint8_t* rgb = (uint8_t*) ps_malloc(INFER_W * INFER_H * 3);
+    if (!rgb) {
+      esp_camera_fb_return(fb);
+      snprintf(r.err, sizeof(r.err), "psram_full");
+      inferResult = r;
+      xSemaphoreGive(inferDoneSem);
+      continue;
+    }
+
+    bool conv = fmt2rgb888(fb->buf, fb->len, PIXFORMAT_JPEG, rgb);
+    esp_camera_fb_return(fb);
+
+    if (!conv) {
+      free(rgb);
+      snprintf(r.err, sizeof(r.err), "decode_failed");
+      inferResult = r;
+      xSemaphoreGive(inferDoneSem);
+      continue;
+    }
+
+    // ── Preprocess: center crop 96×96 → INT8 tensor ──────────
+    float  inScale = inTensor->params.scale;
+    int    inZP    = inTensor->params.zero_point;
+    int8_t* dst    = inTensor->data.int8;
+
+    for (int y = 0; y < CROP_SZ; y++) {
+      for (int x = 0; x < CROP_SZ; x++) {
+        int si = ((CROP_Y + y) * INFER_W + (CROP_X + x)) * 3;
+        int di = (y * CROP_SZ + x) * 3;
+        for (int c = 0; c < 3; c++) {
+          float f = rgb[si + c] / 255.0f;
+          dst[di + c] = (int8_t)constrain((int)roundf(f / inScale) + inZP, -128, 127);
+        }
+      }
+    }
+    free(rgb);
+
+    // ── TFLite Invoke ─────────────────────────────────────────
+    uint32_t t0 = millis();
+    TfLiteStatus st = interpreter->Invoke();
+    r.time_ms = millis() - t0;
+
+    if (st != kTfLiteOk) {
+      snprintf(r.err, sizeof(r.err), "invoke_failed");
+      inferResult = r;
+      xSemaphoreGive(inferDoneSem);
+      continue;
+    }
+
+    r.score = (outTensor->data.int8[0] - outTensor->params.zero_point)
+              * outTensor->params.scale;
+    r.good  = (r.score >= 0.5f);
+    r.ok    = true;
+
+    Serial.printf("[Core0] %s  score=%.3f  %lu ms\n",
+      r.good ? "BAGUS" : "TIDAK BAGUS", r.score, (unsigned long)r.time_ms);
+
+    inferResult = r;
+    xSemaphoreGive(inferDoneSem);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// HTTP: inferensi — Core 1 switch kamera, trigger Core 0, tunggu hasil
 // ─────────────────────────────────────────────────────────────
 void handlePredict() {
   if (!modelLoaded) {
     server.send(503, "application/json", "{\"error\":\"no_model\"}");
     return;
   }
+  if (classifying) {
+    server.send(503, "application/json", "{\"error\":\"busy\"}");
+    return;
+  }
+
   classifying = true;
 
-  // Switch ke QQVGA untuk hemat memori saat decode
+  // Switch ke QQVGA agar frame lebih kecil dan decode lebih cepat
   sensor_t* s = esp_camera_sensor_get();
-  s->set_framesize(s, FRAMESIZE_QQVGA);
-  delay(80);
+  if (s) s->set_framesize(s, FRAMESIZE_QQVGA);
+  delay(80);   // tunggu sensor stabil
 
-  // Buang 2 frame awal agar AWB stabil
-  for (int i = 0; i < 2; i++) {
-    camera_fb_t* fb = esp_camera_fb_get();
-    if (fb) esp_camera_fb_return(fb);
-    delay(40);
-  }
+  xSemaphoreGive(inferTrigSem);   // bangunkan Core 0
 
-  camera_fb_t* fb = esp_camera_fb_get();
-  s->set_framesize(s, FRAMESIZE_VGA);  // kembalikan resolusi ASAP
-
-  if (!fb) {
+  // Tunggu Core 0 selesai (max 8 detik: warm-up 2×40ms + decode + Invoke)
+  if (xSemaphoreTake(inferDoneSem, pdMS_TO_TICKS(8000)) != pdTRUE) {
     classifying = false;
-    server.send(503, "application/json", "{\"error\":\"camera_failed\"}");
+    server.send(503, "application/json", "{\"error\":\"timeout\"}");
     return;
   }
-
-  // Decode JPEG → RGB888 di PSRAM
-  uint8_t* rgb = (uint8_t*) ps_malloc(INFER_W * INFER_H * 3);
-  if (!rgb) {
-    esp_camera_fb_return(fb);
-    classifying = false;
-    server.send(503, "application/json", "{\"error\":\"psram_full\"}");
-    return;
-  }
-
-  bool conv = fmt2rgb888(fb->buf, fb->len, PIXFORMAT_JPEG, rgb);
-  esp_camera_fb_return(fb);
-
-  if (!conv) {
-    free(rgb);
-    classifying = false;
-    server.send(503, "application/json", "{\"error\":\"decode_failed\"}");
-    return;
-  }
-
-  // Preprocess: center crop 96×96 → INT8 input tensor
-  float  inScale = inTensor->params.scale;
-  int    inZP    = inTensor->params.zero_point;
-  int8_t* dst    = inTensor->data.int8;
-
-  for (int y = 0; y < CROP_SZ; y++) {
-    for (int x = 0; x < CROP_SZ; x++) {
-      int src = ((CROP_Y + y) * INFER_W + (CROP_X + x)) * 3;
-      int out = (y * CROP_SZ + x) * 3;
-      for (int c = 0; c < 3; c++) {
-        float f = rgb[src + c] / 255.0f;
-        dst[out + c] = (int8_t) constrain((int)roundf(f / inScale) + inZP, -128, 127);
-      }
-    }
-  }
-  free(rgb);
-
-  // Inferensi
-  uint32_t t0 = millis();
-  TfLiteStatus st = interpreter->Invoke();
-  uint32_t dt = millis() - t0;
   classifying = false;
 
-  if (st != kTfLiteOk) {
-    server.send(503, "application/json", "{\"error\":\"invoke_failed\"}");
+  if (!inferResult.ok) {
+    char resp[80];
+    snprintf(resp, sizeof(resp), "{\"error\":\"%s\"}", inferResult.err);
+    server.send(503, "application/json", resp);
     return;
   }
-
-  float score = (outTensor->data.int8[0] - outTensor->params.zero_point)
-                * outTensor->params.scale;
-  bool isGood = (score >= 0.5f);
 
   char resp[160];
   snprintf(resp, sizeof(resp),
     "{\"label\":\"%s\",\"score\":%.4f,\"time_ms\":%lu,\"good\":%s}",
-    isGood ? "BAGUS" : "TIDAK BAGUS", score, (unsigned long)dt,
-    isGood ? "true" : "false");
+    inferResult.good ? "BAGUS" : "TIDAK BAGUS",
+    inferResult.score, (unsigned long)inferResult.time_ms,
+    inferResult.good ? "true" : "false");
   server.send(200, "application/json", resp);
-
-  Serial.printf("[PREDICT] %s  score=%.3f  %lu ms\n",
-    isGood ? "BAGUS" : "TIDAK BAGUS", score, (unsigned long)dt);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -543,7 +608,15 @@ void setup() {
   resolver.AddDequantize();
   initTFLite();
 
-  // 6. WiFi
+  // 6. Dual-core: semaphore + inference task di Core 0
+  inferTrigSem = xSemaphoreCreateBinary();
+  inferDoneSem = xSemaphoreCreateBinary();
+  xTaskCreatePinnedToCore(
+    inferenceTask, "Infer", 16384, NULL, 2, &inferTaskHandle, 0
+  );
+  Serial.println("[OK] Inference task → Core 0 (prio 2)");
+
+  // 7. WiFi
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   Serial.printf("[..] Connecting to '%s'", WIFI_SSID);
   for (int t = 0; t < 30 && WiFi.status() != WL_CONNECTED; t++) {
@@ -556,13 +629,14 @@ void setup() {
     Serial.println("\n[WARN] WiFi gagal — akan retry di loop");
   }
 
-  // 7. mDNS
+  // 8. mDNS
   if (MDNS.begin("telur")) Serial.println("[OK] mDNS: http://telur.local");
 
-  // 8. Routes HTTP
+  // 9. Routes HTTP
   server.on("/",             HTTP_GET,  handleRoot);
   server.on("/index.html",   HTTP_GET,  handleRoot);
   server.on("/app.js",       HTTP_GET,  handleAppJS);
+  server.on("/style.css",    HTTP_GET,  handleCSS);
   server.on("/capture",      HTTP_GET,  handleCapture);
   server.on("/save_image",   HTTP_GET,  handleSaveImage);
   server.on("/sd_stats",     HTTP_GET,  handleSDStats);

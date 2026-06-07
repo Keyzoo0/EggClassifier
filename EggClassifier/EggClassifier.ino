@@ -22,6 +22,8 @@
  */
 
 #include <Wire.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include "DFRobot_AXP313A.h"
 #include "esp_camera.h"
 #include "TensorFlowLite_ESP32.h"
@@ -76,6 +78,11 @@ DFRobot_AXP313A axp;
 bool initCamera();
 bool initTFLite();
 void runClassify();
+void classifyTask(void* pvParameters);
+
+// ── Dual-core: classification runs on Core 0 ────────────────
+static TaskHandle_t classifyTaskHandle = NULL;
+static volatile bool classifyPending = false;
 
 // ─────────────────────────────────────────────────────────────
 void setup() {
@@ -110,6 +117,16 @@ void setup() {
   // 3. TFLite
   if (!initTFLite()) return;
 
+  // 4. Create classification task on Core 0 (protocol CPU)
+  //    Core 1 handles Arduino loop (UI), Core 0 does heavy inference
+  xTaskCreatePinnedToCore(
+    classifyTask, "Classify", 16384, NULL, 1, &classifyTaskHandle, 0
+  );
+  if (classifyTaskHandle == NULL) {
+    Serial.println("[ERROR] Gagal membuat task Core 0.");
+    return;
+  }
+
   Serial.println("\n[READY] Tekan tombol BOOT atau kirim 'c' untuk klasifikasi.");
   Serial.println("─────────────────────────────────────────\n");
 }
@@ -119,7 +136,10 @@ void loop() {
   if (digitalRead(BOOT_BTN) == LOW) {
     delay(50);                         // debounce
     if (digitalRead(BOOT_BTN) == LOW) {
-      runClassify();
+      if (!classifyPending) {
+        classifyPending = true;
+        xTaskNotifyGive(classifyTaskHandle);
+      }
       while (digitalRead(BOOT_BTN) == LOW) delay(10);  // tunggu lepas
     }
   }
@@ -127,7 +147,10 @@ void loop() {
   // Trigger via Serial ('c')
   if (Serial.available()) {
     char c = Serial.read();
-    if (c == 'c' || c == 'C') runClassify();
+    if ((c == 'c' || c == 'C') && !classifyPending) {
+      classifyPending = true;
+      xTaskNotifyGive(classifyTaskHandle);
+    }
   }
 
   delay(50);
@@ -217,7 +240,7 @@ bool initTFLite() {
   resolver.AddDequantize();
 
   static tflite::MicroInterpreter static_interp(
-    model, resolver, tensor_arena, ARENA_SIZE
+    model, resolver, tensor_arena, ARENA_SIZE, nullptr
   );
   interpreter = &static_interp;
 
@@ -242,6 +265,17 @@ bool initTFLite() {
     ARENA_SIZE / 1024);
 
   return true;
+}
+
+// ─────────────────────────────────────────────────────────────
+// Task berjalan di Core 0 — menunggu notifikasi dari Core 1
+void classifyTask(void* pvParameters) {
+  (void)pvParameters;
+  while (true) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);  // tunggu trigger
+    runClassify();
+    classifyPending = false;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────

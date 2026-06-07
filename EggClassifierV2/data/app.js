@@ -1,72 +1,100 @@
-// ─────────────────────────────────────────────────────────────
-// State
-// ─────────────────────────────────────────────────────────────
-const TARGET       = 300;
-const PREVIEW_MS   = 800;
-let counts         = { good: 0, bad: 0 };
-let activeTab      = 'dataset';
-let isCapturing    = false;
-let isClassifying  = false;
-let frameCount     = 0;
-let previewOk      = false;
-let predictHistory = [];
+// ─── State ────────────────────────────────────────────────────
+const TARGET      = 300;
+const PREVIEW_MS  = 850;
+let counts        = { good: 0, bad: 0 };
+let activeTab     = 'dataset';
+let isCapturing   = false;
+let isClassifying = false;
+let frameCount    = 0;
+let previewOk     = false;
+let history       = [];
+let scoreChart    = null;
 
-// ─────────────────────────────────────────────────────────────
-// Tab
-// ─────────────────────────────────────────────────────────────
+// ─── Score Chart (Chart.js donut) ────────────────────────────
+function initChart() {
+  const ctx = document.getElementById('score-chart').getContext('2d');
+  scoreChart = new Chart(ctx, {
+    type: 'doughnut',
+    data: {
+      datasets: [{
+        data: [0, 100],
+        backgroundColor: ['#6366f1', 'rgba(255,255,255,0.05)'],
+        borderWidth: 0,
+        borderRadius: 3,
+      }]
+    },
+    options: {
+      cutout: '76%',
+      animation: { duration: 700, easing: 'easeOutQuart' },
+      plugins: { legend: { display: false }, tooltip: { enabled: false } },
+    }
+  });
+}
+
+function updateChart(score, isGood) {
+  if (!scoreChart) return;
+  const pct = Math.round(score * 100);
+  const filled = isGood ? pct : (100 - pct);
+  const color  = isGood ? '#4ade80' : '#f87171';
+  scoreChart.data.datasets[0].data = [filled, 100 - filled];
+  scoreChart.data.datasets[0].backgroundColor = [color, 'rgba(255,255,255,0.05)'];
+  scoreChart.update();
+}
+
+// ─── Tab switching ────────────────────────────────────────────
 function switchTab(tab) {
   activeTab = tab;
   ['dataset', 'predict'].forEach(t => {
     document.getElementById('tab-' + t).classList.toggle('hidden', t !== tab);
-    const btn = document.getElementById('btn-' + t);
-    btn.className = btn.className.replace(/tab-(active|inactive)/g, '');
-    btn.classList.add(t === tab ? 'tab-active' : 'tab-inactive');
+    document.getElementById('btn-' + t).classList.toggle('active', t === tab);
   });
+  if (tab === 'predict' && !scoreChart) initChart();
 }
 
-// ─────────────────────────────────────────────────────────────
-// Live Preview
-// ─────────────────────────────────────────────────────────────
+// ─── Live Preview ─────────────────────────────────────────────
 function refreshPreview() {
   if (isClassifying) return;
   const tmp = new Image();
   tmp.onload = () => {
-    const el = document.getElementById('preview');
-    el.src = tmp.src;
+    document.getElementById('preview').src = tmp.src;
     document.getElementById('frame-count').textContent = ++frameCount;
     if (!previewOk) {
       previewOk = true;
       document.getElementById('overlay-loading').style.display = 'none';
-      setWifiStatus(true);
+      setWifi(true);
     }
   };
-  tmp.onerror = () => { if (previewOk) setWifiStatus(false); };
+  tmp.onerror = () => { if (previewOk) setWifi(false); };
   tmp.src = '/capture?t=' + Date.now();
 }
 
-function previewError() {
-  setWifiStatus(false);
-}
+function previewError() { setWifi(false); }
 
-function setWifiStatus(ok) {
-  document.getElementById('wifi-dot').className =
-    'w-2 h-2 rounded-full ' + (ok ? 'bg-green-400' : 'bg-red-400 animate-pulse');
-  document.getElementById('wifi-text').textContent = ok ? 'Terhubung' : 'Tidak terhubung';
+function setWifi(ok) {
+  const dot  = document.getElementById('wifi-dot');
+  const text = document.getElementById('wifi-text');
+  if (ok) {
+    dot.style.background = '#4ade80';
+    dot.classList.remove('dot-pulse');
+    text.textContent = 'Terhubung';
+    text.style.color = '#86efac';
+  } else {
+    dot.style.background = '#f87171';
+    dot.classList.add('dot-pulse');
+    text.textContent = 'Tidak terhubung';
+    text.style.color = '#fca5a5';
+  }
 }
 
 setInterval(refreshPreview, PREVIEW_MS);
 
-// ─────────────────────────────────────────────────────────────
-// Dataset: capture → simpan ke SD (server-side)
-// ─────────────────────────────────────────────────────────────
+// ─── Dataset: capture & save ──────────────────────────────────
 async function captureImage(label) {
   if (isCapturing) return;
   isCapturing = true;
 
   const btn = document.getElementById(label + '-btn');
   btn.disabled = true;
-  btn.classList.add(label === 'good' ? 'flash-good' : 'flash-bad');
-  setTimeout(() => btn.classList.remove('flash-good', 'flash-bad'), 400);
 
   try {
     const res  = await fetch('/save_image?label=' + label + '&t=' + Date.now());
@@ -102,18 +130,17 @@ function updateCounters() {
     document.getElementById(l + '-bar').style.width = pct + '%';
   });
 
-  const remaining = Math.max(0, TARGET - counts.good) + Math.max(0, TARGET - counts.bad);
+  const rem  = Math.max(0, TARGET - counts.good) + Math.max(0, TARGET - counts.bad);
   const info = document.getElementById('progress-info');
   if (counts.good >= TARGET && counts.bad >= TARGET) {
-    info.innerHTML = '<span class="text-green-400 font-semibold">✓ Dataset lengkap! Siap training.</span>';
+    info.innerHTML =
+      '<span style="color:var(--success);font-weight:700">✓ Dataset lengkap! Siap training.</span>';
   } else {
-    info.textContent = 'Perlu ' + remaining + ' foto lagi untuk mencapai target 300/kelas';
+    info.textContent = 'Perlu ' + rem + ' foto lagi untuk target 300/kelas';
   }
 }
 
-// ─────────────────────────────────────────────────────────────
-// SD Stats (polling 10 detik)
-// ─────────────────────────────────────────────────────────────
+// ─── SD Stats ─────────────────────────────────────────────────
 async function loadSDStats() {
   try {
     const res  = await fetch('/sd_stats');
@@ -126,7 +153,7 @@ async function loadSDStats() {
       counts.bad  = data.bad;
       updateCounters();
       document.getElementById('sd-badge').textContent =
-        data.free_mb + ' MB bebas';
+        data.free_mb + ' MB bebas · total ' + data.total_mb + ' MB';
     }
   } catch (_) {}
 }
@@ -134,38 +161,42 @@ async function loadSDStats() {
 loadSDStats();
 setInterval(loadSDStats, 10000);
 
-// ─────────────────────────────────────────────────────────────
-// Thumbnails
-// ─────────────────────────────────────────────────────────────
+// ─── Thumbnails ───────────────────────────────────────────────
 function addThumb(label, n) {
   const grid  = document.getElementById('thumb-grid');
   const empty = document.getElementById('thumb-empty');
   empty.classList.add('hidden');
 
-  const tmp = new Image();
-  tmp.onload = () => {
+  const img = new Image();
+  img.onload = () => {
     const wrap = document.createElement('div');
-    wrap.className = 'relative rounded-lg overflow-hidden bg-slate-900 aspect-square';
-    wrap.innerHTML =
-      `<img src="${tmp.src}" class="w-full h-full object-cover">` +
-      `<span class="absolute bottom-0 inset-x-0 text-center text-xs font-bold py-0.5 opacity-90
-                    ${label === 'good' ? 'bg-green-700' : 'bg-red-700'} text-white">#${n}</span>`;
+    wrap.className = 'thumb';
+    const imgEl = document.createElement('img');
+    imgEl.src = img.src;
+    imgEl.alt = label;
+    const lbl = document.createElement('div');
+    lbl.className = 'thumb-label ' + (label === 'good' ? 'thumb-label-good' : 'thumb-label-bad');
+    lbl.textContent = '#' + n;
+    wrap.appendChild(imgEl);
+    wrap.appendChild(lbl);
     grid.insertBefore(wrap, grid.firstChild);
     while (grid.children.length > 6) grid.removeChild(grid.lastChild);
   };
-  tmp.src = '/capture?t=' + Date.now();
+  img.src = '/capture?t=' + Date.now();
 }
 
-// ─────────────────────────────────────────────────────────────
-// Predict: klasifikasi real-time
-// ─────────────────────────────────────────────────────────────
+// ─── Predict ──────────────────────────────────────────────────
 async function runPredict() {
   if (isClassifying) return;
+  if (!scoreChart) initChart();
   isClassifying = true;
 
   const btn = document.getElementById('predict-btn');
   btn.disabled = true;
-  btn.textContent = '⏳ Menganalisis...';
+  btn.textContent = '⏳  Menganalisis...';
+  btn.classList.add('btn-classify-busy');
+
+  document.getElementById('busy-badge').classList.remove('hidden');
 
   try {
     const res  = await fetch('/predict?t=' + Date.now());
@@ -189,68 +220,93 @@ async function runPredict() {
   } finally {
     isClassifying = false;
     btn.disabled  = false;
-    btn.innerHTML = '🔍 Klasifikasi  <span class="text-sm font-normal opacity-70">(C)</span>';
+    btn.innerHTML =
+      '🔍 &nbsp;Klasifikasi' +
+      '<span style="font-size:14px;font-weight:400;opacity:0.55;margin-left:4px">(C)</span>';
+    btn.classList.remove('btn-classify-busy');
+    document.getElementById('busy-badge').classList.add('hidden');
   }
 }
 
 function showResult(data) {
-  const card  = document.getElementById('result-card');
-  const label = document.getElementById('result-label');
-  const score = document.getElementById('result-score');
-  const ring  = document.getElementById('result-score-ring');
-  const conf  = document.getElementById('result-confidence');
-  const time  = document.getElementById('result-time');
-
+  const card = document.getElementById('result-card');
   card.classList.remove('hidden');
+  card.classList.remove('result-reveal');
+  void card.offsetWidth;  // reflow to retrigger animation
+  card.classList.add('result-reveal');
 
-  label.textContent = data.label;
-  label.className   = 'text-4xl font-black ' +
-    (data.good ? 'text-green-400' : 'text-red-400');
+  // Donut chart
+  updateChart(data.score, data.good);
 
+  // Pulse ring on chart wrap
+  const wrap = document.getElementById('chart-wrap');
+  wrap.classList.remove('ring-good', 'ring-bad');
+  void wrap.offsetWidth;
+  wrap.classList.add(data.good ? 'ring-good' : 'ring-bad');
+
+  // Score text
   const pct = (data.score * 100).toFixed(1);
-  score.textContent = pct + '%';
-  ring.className    = ring.className.replace(/border-\S+/g, '') +
-    ' border-' + (data.good ? 'green-500' : 'red-500');
+  document.getElementById('result-score').textContent = pct + '%';
+  document.getElementById('result-score').style.color =
+    data.good ? 'var(--success)' : 'var(--danger)';
 
+  // Label
+  const label = document.getElementById('result-label');
+  label.textContent = data.label;
+  label.style.color = data.good ? 'var(--success)' : 'var(--danger)';
+
+  // Confidence
   const confLevel =
     data.score > 0.85 || data.score < 0.15 ? 'TINGGI' :
     data.score > 0.70 || data.score < 0.30 ? 'SEDANG' : 'RENDAH';
+  const confEl = document.getElementById('result-confidence');
+  confEl.textContent = confLevel;
+  confEl.style.color =
+    confLevel === 'TINGGI' ? 'var(--success)' :
+    confLevel === 'SEDANG' ? 'var(--warn)'    : 'var(--danger)';
 
-  conf.textContent = confLevel;
-  conf.className   = 'font-semibold ' + (
-    confLevel === 'TINGGI' ? 'text-green-400' :
-    confLevel === 'SEDANG' ? 'text-yellow-400' : 'text-red-400');
-
-  time.textContent = data.time_ms + ' ms';
+  // Time
+  document.getElementById('result-time').textContent = data.time_ms + ' ms';
 
   showToast(
-    (data.good ? '✅ ' : '❌ ') + data.label + ' (' + pct + '%)',
+    (data.good ? '✅ ' : '❌ ') + data.label + ' — ' + pct + '%',
     data.good ? 'good' : 'bad'
   );
 }
 
 function addHistory(data) {
-  predictHistory.unshift(data);
-  if (predictHistory.length > 6) predictHistory.pop();
+  history.unshift(data);
+  if (history.length > 8) history.pop();
 
-  const box = document.getElementById('history-box');
+  const box  = document.getElementById('history-box');
   const list = document.getElementById('history-list');
   box.classList.remove('hidden');
   list.innerHTML = '';
 
-  predictHistory.forEach(d => {
-    const el = document.createElement('div');
-    el.className = 'flex justify-between items-center px-3 py-1.5 rounded-lg bg-slate-700/40 text-sm';
+  history.forEach((d, i) => {
+    const pct  = (d.score * 100).toFixed(1);
+    const isGd = d.good;
+    const el   = document.createElement('div');
+    el.className = 'history-item';
     el.innerHTML =
-      `<span class="font-semibold ${d.good ? 'text-green-400' : 'text-red-400'}">${d.label}</span>` +
-      `<span class="text-slate-400">${(d.score*100).toFixed(1)}% · ${d.time_ms} ms</span>`;
+      `<div class="flex items-center gap-2">` +
+        `<span class="hist-badge" style="` +
+          `background:${isGd ? 'rgba(74,222,128,0.12)' : 'rgba(248,113,113,0.12)'};` +
+          `color:${isGd ? '#86efac' : '#fca5a5'};` +
+          `border:1px solid ${isGd ? 'rgba(74,222,128,0.25)' : 'rgba(248,113,113,0.25)'}">` +
+          `${isGd ? 'BAGUS' : 'CACAT'}` +
+        `</span>` +
+        `<span style="font-size:12px;color:var(--text-2)">#${history.length - i}</span>` +
+      `</div>` +
+      `<div class="text-right" style="font-size:12px">` +
+        `<span class="font-bold font-mono" style="color:${isGd ? 'var(--success)' : 'var(--danger)'}">${pct}%</span>` +
+        `<span style="color:var(--text-3);margin-left:8px">${d.time_ms} ms</span>` +
+      `</div>`;
     list.appendChild(el);
   });
 }
 
-// ─────────────────────────────────────────────────────────────
-// Model: info + upload
-// ─────────────────────────────────────────────────────────────
+// ─── Model: info + upload ─────────────────────────────────────
 async function loadModelInfo() {
   try {
     const res  = await fetch('/model_info');
@@ -259,12 +315,12 @@ async function loadModelInfo() {
     const warn = document.getElementById('no-model-warning');
 
     if (data.loaded) {
-      el.textContent = 'egg_model.tflite (' + data.size_kb + ' KB) ✓';
-      el.className   = 'text-xs text-green-400';
+      el.textContent = '✓ ' + data.size_kb + ' KB';
+      el.className   = 'badge-loaded';
       warn.classList.add('hidden');
     } else {
       el.textContent = 'Tidak ada model';
-      el.className   = 'text-xs text-red-400';
+      el.className   = 'badge-missing';
       warn.classList.remove('hidden');
     }
   } catch (_) {}
@@ -272,14 +328,20 @@ async function loadModelInfo() {
 
 function onFileSelected(input) {
   const file = input.files[0];
-  document.getElementById('file-label').textContent =
-    file ? file.name + ' (' + (file.size / 1024).toFixed(0) + ' KB)' : 'Pilih file .tflite ...';
-  document.getElementById('upload-btn').disabled = !file;
+  const lbl  = document.getElementById('file-label');
+  const btn  = document.getElementById('upload-btn');
+  if (file) {
+    lbl.textContent = file.name + ' — ' + (file.size / 1024).toFixed(0) + ' KB';
+    lbl.style.color = 'var(--text-1)';
+  } else {
+    lbl.textContent = 'Pilih atau drop file .tflite';
+    lbl.style.color = 'var(--text-2)';
+  }
+  btn.disabled = !file;
 }
 
 async function uploadModel() {
-  const fileInput = document.getElementById('model-file');
-  const file = fileInput.files[0];
+  const file = document.getElementById('model-file').files[0];
   if (!file) { showToast('Pilih file .tflite dulu', 'error'); return; }
 
   const btn      = document.getElementById('upload-btn');
@@ -289,11 +351,11 @@ async function uploadModel() {
 
   btn.disabled = true;
   progress.classList.remove('hidden');
-  fill.style.width = '0%';
+  fill.style.width   = '0%';
   status.textContent = 'Mengunggah...';
 
   try {
-    const fd  = new FormData();
+    const fd = new FormData();
     fd.append('model', file);
 
     const result = await new Promise((resolve, reject) => {
@@ -301,7 +363,7 @@ async function uploadModel() {
       xhr.upload.onprogress = e => {
         if (e.lengthComputable) {
           const pct = Math.round(e.loaded / e.total * 100);
-          fill.style.width = pct + '%';
+          fill.style.width   = pct + '%';
           status.textContent = 'Mengunggah... ' + pct + '%';
         }
       };
@@ -315,11 +377,10 @@ async function uploadModel() {
     });
 
     if (result.ok) {
-      fill.style.width = '100%';
-      status.textContent = '✅ Tersimpan (' + result.size_kb + ' KB) — Board restart...';
+      fill.style.width   = '100%';
+      status.textContent = '✅ Tersimpan (' + result.size_kb + ' KB) — Menunggu restart...';
       showToast('Model diupload! Menunggu restart...', 'good');
 
-      // Poll sampai board kembali online
       await waitForRestart();
       status.textContent = '✅ Model aktif!';
       showToast('✅ Model baru aktif!', 'good');
@@ -341,45 +402,60 @@ async function uploadModel() {
 
 async function waitForRestart(maxWait = 15000) {
   const t0 = Date.now();
-  await new Promise(r => setTimeout(r, 2500));  // beri waktu restart
+  await new Promise(r => setTimeout(r, 2500));
   while (Date.now() - t0 < maxWait) {
-    try {
-      await fetch('/capture?t=' + Date.now());
-      return;  // board online lagi
-    } catch (_) {
-      await new Promise(r => setTimeout(r, 800));
-    }
+    try { await fetch('/capture?t=' + Date.now()); return; }
+    catch (_) { await new Promise(r => setTimeout(r, 800)); }
   }
 }
 
 loadModelInfo();
 
-// ─────────────────────────────────────────────────────────────
-// Toast
-// ─────────────────────────────────────────────────────────────
+// ─── Drag-and-drop on dropzone ───────────────────────────────
+const dz = document.getElementById('dropzone-area');
+if (dz) {
+  dz.addEventListener('dragover', e => {
+    e.preventDefault();
+    dz.classList.add('drag-over');
+  });
+  dz.addEventListener('dragleave', () => dz.classList.remove('drag-over'));
+  dz.addEventListener('drop', e => {
+    e.preventDefault();
+    dz.classList.remove('drag-over');
+    const file = e.dataTransfer.files[0];
+    if (file && file.name.endsWith('.tflite')) {
+      const input = document.getElementById('model-file');
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      input.files = dt.files;
+      onFileSelected(input);
+    } else {
+      showToast('File harus berekstensi .tflite', 'error');
+    }
+  });
+}
+
+// ─── Toast ────────────────────────────────────────────────────
 function showToast(msg, type) {
-  const colors = { good:'bg-green-700', bad:'bg-red-700', error:'bg-amber-700' };
+  const container = document.getElementById('toast-container');
   const el = document.createElement('div');
-  el.className = `${colors[type] || 'bg-slate-700'} text-white text-sm px-4 py-2
-                  rounded-lg shadow-lg pointer-events-auto transition-all duration-300
-                  translate-y-2 opacity-0`;
+  el.className = 'toast toast-' + (type === 'good' ? 'good' : type === 'bad' ? 'bad' : 'error');
   el.textContent = msg;
-  document.getElementById('toast-container').appendChild(el);
-  requestAnimationFrame(() => el.classList.remove('translate-y-2', 'opacity-0'));
+  container.appendChild(el);
+
   setTimeout(() => {
-    el.classList.add('opacity-0', 'translate-y-2');
-    setTimeout(() => el.remove(), 300);
+    el.classList.add('toast-exit');
+    setTimeout(() => el.remove(), 220);
   }, 2800);
 }
 
-// ─────────────────────────────────────────────────────────────
-// Keyboard shortcuts
-// ─────────────────────────────────────────────────────────────
+// ─── Keyboard shortcuts ───────────────────────────────────────
 document.addEventListener('keydown', e => {
   if (e.target.tagName === 'INPUT' || e.repeat) return;
-  if (e.key === 'g' || e.key === 'G') captureImage('good');
-  if (e.key === 'b' || e.key === 'B') captureImage('bad');
-  if (e.key === 'c' || e.key === 'C') runPredict();
-  if (e.key === '1') switchTab('dataset');
-  if (e.key === '2') switchTab('predict');
+  const k = e.key;
+  if (k === 'g' || k === 'G') captureImage('good');
+  if (k === 'b' || k === 'B') captureImage('bad');
+  if (k === 'c' || k === 'C') { switchTab('predict'); runPredict(); }
+  if (k === '1') switchTab('dataset');
+  if (k === '2') switchTab('predict');
 });

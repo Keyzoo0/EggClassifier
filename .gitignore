@@ -39,3 +39,6 @@ CameraTest/build/
 # OS
 .DS_Store
 Thumbs.db
+
+# Claude Code internal
+.embedder/

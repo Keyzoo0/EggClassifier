@@ -44,8 +44,8 @@
 #include "esp_camera.h"
 
 // === GANTI SESUAI JARINGAN ANDA ===
-#define WIFI_SSID "sahrul"
-#define WIFI_PASS "12345678"
+#define WIFI_SSID "Warmindo Samndut Suhat. 4G"
+#define WIFI_PASS "Tanyakasir"
 // ==================================
 
 // Pin mapping FireBeetle 2 ESP32-S3 N16R8
