@@ -208,5 +208,4 @@ void setup() {
 // ── Loop ──────────────────────────────────────────────────────
 void loop() {
   server.handleClient();
-  MDNS.update();
 }
