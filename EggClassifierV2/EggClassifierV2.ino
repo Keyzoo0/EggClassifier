@@ -619,8 +619,10 @@ void setup() {
   // 7. WiFi
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   Serial.printf("[..] Connecting to '%s'", WIFI_SSID);
-  for (int t = 0; t < 30 && WiFi.status() != WL_CONNECTED; t++) {
-    delay(500); Serial.print(".");
+  for (int t = 0; t < 60 && WiFi.status() != WL_CONNECTED; t++) {
+    delay(250);
+    updateLED();           // LED kedip selama proses connecting
+    if (t % 2 == 0) Serial.print(".");  // titik tiap 500 ms
   }
   if (WiFi.status() == WL_CONNECTED) {
     Serial.printf("\n[OK] WiFi: http://%s\n", WiFi.localIP().toString().c_str());
