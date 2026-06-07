@@ -74,14 +74,11 @@ OV2640 Camera (RGB565 320×240)
 klasifikasiTelur_ESP32_S3_CAM/
 ├── README.md
 ├── dokumentasi_proyek.md       # Riset mendalam arsitektur & pipeline
-├── ESP32-S3-EggClassifier/     # Firmware PlatformIO (ESP-IDF)
-│   ├── platformio.ini          # Konfigurasi board & build
-│   ├── sdkconfig.defaults      # PSRAM Octal, Flash 16MB, CPU 240MHz
-│   ├── src/
-│   │   ├── main.c              # Aplikasi utama
-│   │   ├── CMakeLists.txt
-│   │   └── idf_component.yml   # Dependency: esp32-camera
-│   └── dependencies.lock       # Lock file komponen
+├── docs/
+│   ├── dimesion.jpg            # Dimensi board FireBeetle 2
+│   └── schematic.jpg           # Skematik rangkaian
+├── CameraTest/                 # Arduino sketch — Phase 1
+│   └── CameraTest.ino          # Uji kamera: capture 5 frame, cek memori
 └── training/                   # (akan dibuat) Script Python training
     ├── train.py
     ├── convert_to_tflite.py
@@ -90,29 +87,38 @@ klasifikasiTelur_ESP32_S3_CAM/
 
 ---
 
-## Cara Build & Flash
+## Cara Build & Flash (Arduino IDE)
 
 ### Prasyarat
 
-- [VS Code](https://code.visualstudio.com/) + extension [PlatformIO](https://platformio.org/install/ide?install=vscode)
-- Python 3.10+ (untuk training)
+1. [Arduino IDE 2.x](https://www.arduino.cc/en/software)
+2. Tambahkan board ESP32 — buka **File → Preferences**, tambahkan URL berikut ke *Additional boards manager URLs*:
+   ```
+   https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+   ```
+3. Buka **Tools → Board → Boards Manager**, cari `esp32` by Espressif, install.
 
-### Build dan Upload
+### Konfigurasi Board di Arduino IDE
 
-```bash
-cd ESP32-S3-EggClassifier
+Buka sketch `CameraTest/CameraTest.ino`, lalu set di menu **Tools**:
 
-# Build
-~/.platformio/penv/bin/platformio run
+| Pengaturan | Nilai |
+|---|---|
+| Board | `ESP32S3 Dev Module` |
+| Flash Size | `16MB (128Mb)` |
+| Partition Scheme | `Default 4MB with spiffs` |
+| PSRAM | `Disabled` |
+| CPU Frequency | `240MHz` |
+| **USB CDC On Boot** | **`Enabled`** ← wajib untuk Serial |
+| Upload Speed | `921600` |
+| Port | `/dev/ttyACM0` (Linux) atau `COMx` (Windows) |
 
-# Upload ke board
-~/.platformio/penv/bin/platformio run -t upload
+### Upload
 
-# Buka serial monitor
-~/.platformio/penv/bin/platformio device monitor
-```
-
-Atau gunakan tombol di status bar VS Code: **Build (✓)** → **Upload (→)** → **Monitor (🔌)**
+1. Sambungkan board via USB-C
+2. Pilih port yang benar di **Tools → Port**
+3. Klik **Upload (→)**
+4. Buka **Serial Monitor** (baud: 115200)
 
 ---
 

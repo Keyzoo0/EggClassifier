@@ -76,7 +76,8 @@ static esp_err_t camera_init_test(void)
         .frame_size    = FRAMESIZE_QVGA,   // 320x240
         .jpeg_quality  = 12,
         .fb_count      = 1,
-        .fb_location   = CAMERA_FB_IN_PSRAM,
+        // PSRAM tidak tersedia di board ini -> frame buffer di DRAM internal
+        .fb_location   = CAMERA_FB_IN_DRAM,
         .grab_mode     = CAMERA_GRAB_LATEST,
     };
 
@@ -131,15 +132,26 @@ static void capture_test_frames(void)
 
 void app_main(void)
 {
+    // Beri waktu USB-CDC re-enumerate agar log awal tidak hilang di monitor
+    vTaskDelay(pdMS_TO_TICKS(2000));
+
     ESP_LOGI(TAG, "=== FireBeetle 2 ESP32-S3 N16R8 — Camera Test ===");
 
     print_memory_info();
 
     ESP_LOGI(TAG, "Inisialisasi kamera...");
-    if (camera_init_test() != ESP_OK) {
-        return;
+    esp_err_t cam_ok = camera_init_test();
+    if (cam_ok == ESP_OK) {
+        ESP_LOGI(TAG, "Kamera berhasil diinisialisasi");
+        capture_test_frames();
     }
-    ESP_LOGI(TAG, "Kamera berhasil diinisialisasi");
 
-    capture_test_frames();
+    // Loop status agar serial monitor bisa connect kapan saja
+    while (1) {
+        ESP_LOGI(TAG, "[heartbeat] PSRAM free=%lu KB, SRAM free=%lu KB, camera=%s",
+                 (unsigned long)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024),
+                 (unsigned long)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
+                 cam_ok == ESP_OK ? "OK" : "FAIL");
+        vTaskDelay(pdMS_TO_TICKS(3000));
+    }
 }

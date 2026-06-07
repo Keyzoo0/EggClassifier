@@ -30,6 +30,12 @@ __pycache__/
 venv/
 training/.ipynb_checkpoints/
 
+# Arduino IDE build artifacts
+CameraTest/build/
+**/build/
+*.ino.elf
+*.ino.bin
+
 # OS
 .DS_Store
 Thumbs.db
