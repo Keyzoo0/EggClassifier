@@ -44,6 +44,7 @@
 #include "TensorFlowLite_ESP32.h"
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
+#include "tensorflow/lite/micro/micro_error_reporter.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 
 // ── Credentials ───────────────────────────────────────────────
@@ -93,9 +94,10 @@ DFRobot_AXP313A axp;
 WebServer        server(80);
 SPIClass         spiSD(HSPI);
 
-// TFLite
-static uint8_t                          tensorArena[ARENA_SIZE] __attribute__((aligned(16)));
+// TFLite — arena dari PSRAM (200KB terlalu besar untuk SRAM)
+static uint8_t*                           tensorArena = nullptr;
 static tflite::MicroMutableOpResolver<10> resolver;
+static tflite::MicroErrorReporter        tfliteErrReporter;
 static tflite::MicroInterpreter*          interpreter = nullptr;
 static TfLiteTensor*                      inTensor    = nullptr;
 static TfLiteTensor*                      outTensor   = nullptr;
@@ -227,7 +229,7 @@ bool initTFLite() {
   modelSizeKB = sz / 1024;
 
   uint8_t* buf = (uint8_t*) ps_malloc(sz);
-  if (!buf) { f.close(); Serial.println("[TF] ps_malloc gagal"); return false; }
+  if (!buf) { f.close(); Serial.println("[TF] ps_malloc model gagal"); return false; }
 
   f.read(buf, sz);
   f.close();
@@ -238,7 +240,17 @@ bool initTFLite() {
     free(buf); return false;
   }
 
-  static tflite::MicroInterpreter interp(model, resolver, tensorArena, ARENA_SIZE);
+  // Arena dari PSRAM — 200KB terlalu besar untuk SRAM
+  if (!tensorArena) {
+    tensorArena = (uint8_t*) ps_malloc(ARENA_SIZE);
+    if (!tensorArena) { free(buf); Serial.println("[TF] ps_malloc arena gagal"); return false; }
+  }
+  memset(tensorArena, 0, ARENA_SIZE);
+
+  // ErrorReporter wajib diisi pada library ini
+  static tflite::MicroInterpreter interp(
+    model, resolver, tensorArena, ARENA_SIZE, &tfliteErrReporter
+  );
   interpreter = &interp;
 
   if (interpreter->AllocateTensors() != kTfLiteOk) {
@@ -467,9 +479,8 @@ void handleUploadDone() {
     "{\"ok\":true,\"size_kb\":%d,\"restarting\":true}", (int)(sz / 1024));
   server.send(200, "application/json", resp);
 
-  // Flush TCP buffer lalu restart
-  server.client().flush();
-  delay(500);
+  // Beri waktu TCP kirim response, lalu restart
+  delay(800);
   Serial.println("[INFO] Model diupload, restart...");
   ESP.restart();
 }
