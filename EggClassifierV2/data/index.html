@@ -140,10 +140,23 @@
     <p id="progress-info" class="text-xs text-center" style="color:var(--text-3)"></p>
   </div>
 
-  <!-- SD warning -->
+  <!-- SD warning (hanya muncul saat SD tidak ada) -->
   <div id="sd-warning" class="hidden warn-box">
     <p class="text-xs font-medium" style="color:var(--warn)">
-      ⚠️ SD card tidak terhubung. Pasang modul SD pada GPIO SCK=17 MO=15 MI=16 CS=10 lalu restart.
+      ⚠️ SD card tidak terhubung — mode download aktif otomatis.
+      Pasang modul SD (SCK=17 MO=15 MI=16 CS=10) dan restart untuk mode SD.
+    </p>
+  </div>
+
+  <!-- Download mode info (hanya muncul saat SD tidak ada) -->
+  <div id="dl-mode-info" class="hidden card p-3 space-y-1"
+       style="border-color:rgba(99,102,241,0.25);background:rgba(99,102,241,0.06)">
+    <p class="text-xs font-semibold" style="color:var(--primary)">📥 Mode Download Aktif</p>
+    <p class="text-xs" style="color:var(--text-2)">
+      Setiap klik tombol → foto langsung diunduh ke PC dengan nama
+      <code style="background:rgba(255,255,255,0.08);padding:1px 5px;border-radius:4px">good_0001.jpg</code> /
+      <code style="background:rgba(255,255,255,0.08);padding:1px 5px;border-radius:4px">bad_0001.jpg</code>
+      dst. Pindahkan manual ke folder dataset untuk training.
     </p>
   </div>
 

@@ -9,6 +9,13 @@ let frameCount    = 0;
 let previewOk     = false;
 let history       = [];
 let scoreChart    = null;
+let sdReady       = false;
+
+// Counter download mode — persisten di localStorage agar tidak reset saat refresh
+const dlCounts = {
+  good: parseInt(localStorage.getItem('dl_good') || '0'),
+  bad:  parseInt(localStorage.getItem('dl_bad')  || '0'),
+};
 
 // ─── Score Chart (Chart.js donut) ────────────────────────────
 function initChart() {
@@ -88,39 +95,71 @@ function setWifi(ok) {
 
 setInterval(refreshPreview, PREVIEW_MS);
 
-// ─── Dataset: capture & save ──────────────────────────────────
+// ─── Dataset: capture & save / download ──────────────────────
 async function captureImage(label) {
   if (isCapturing) return;
   isCapturing = true;
-
   const btn = document.getElementById(label + '-btn');
   btn.disabled = true;
 
   try {
-    const res  = await fetch('/save_image?label=' + label + '&t=' + Date.now());
-    const data = await res.json();
-
-    if (!res.ok || data.error) {
-      const msg = data.error === 'sd_not_ready'
-        ? 'SD card tidak terhubung!'
-        : 'Gagal simpan: ' + (data.error || res.status);
-      showToast(msg, 'error');
-      return;
+    if (sdReady) {
+      await _captureToSD(label);
+    } else {
+      await _captureToDownload(label);
     }
-
-    counts[label] = data.count;
-    updateCounters();
-    addThumb(label, data.count);
-    showToast(
-      (label === 'good' ? '✅ BAGUS' : '❌ CACAT') + ' #' + data.count + ' → SD card',
-      label
-    );
   } catch (e) {
     showToast('Error: ' + e.message, 'error');
   } finally {
     btn.disabled = false;
     isCapturing  = false;
   }
+}
+
+async function _captureToSD(label) {
+  const res  = await fetch('/save_image?label=' + label + '&t=' + Date.now());
+  const data = await res.json();
+  if (!res.ok || data.error) {
+    showToast('Gagal simpan SD: ' + (data.error || res.status), 'error');
+    return;
+  }
+  counts[label] = data.count;
+  updateCounters();
+  addThumb(label, data.count);
+  showToast(
+    (label === 'good' ? '✅ BAGUS' : '❌ CACAT') + ' #' + data.count + ' → SD card',
+    label
+  );
+}
+
+async function _captureToDownload(label) {
+  const res = await fetch('/capture?t=' + Date.now());
+  if (!res.ok) throw new Error('Camera gagal (' + res.status + ')');
+  const blob = await res.blob();
+
+  dlCounts[label]++;
+  localStorage.setItem('dl_' + label, dlCounts[label]);
+
+  const n     = dlCounts[label];
+  const fname = label + '_' + String(n).padStart(4, '0') + '.jpg';
+
+  // Trigger browser download
+  const url = URL.createObjectURL(blob);
+  const a   = document.createElement('a');
+  a.href     = url;
+  a.download = fname;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+
+  counts[label] = n;
+  updateCounters();
+  addThumb(label, n);
+  showToast(
+    (label === 'good' ? '✅ BAGUS' : '❌ CACAT') + ' #' + n + ' → ' + fname,
+    label
+  );
 }
 
 function updateCounters() {
@@ -145,16 +184,27 @@ async function loadSDStats() {
   try {
     const res  = await fetch('/sd_stats');
     const data = await res.json();
+    const wasReady = sdReady;
+    sdReady = data.ready;
 
     document.getElementById('sd-warning').classList.toggle('hidden', data.ready);
+    document.getElementById('dl-mode-info').classList.toggle('hidden', data.ready);
 
+    const badge = document.getElementById('sd-badge');
     if (data.ready) {
       counts.good = data.good;
       counts.bad  = data.bad;
-      updateCounters();
-      document.getElementById('sd-badge').textContent =
-        data.free_mb + ' MB bebas · total ' + data.total_mb + ' MB';
+      badge.textContent = data.free_mb + ' MB bebas · total ' + data.total_mb + ' MB';
+      badge.style.color = 'var(--text-2)';
+    } else {
+      // Mode download: tampilkan counter dari localStorage
+      counts.good = dlCounts.good;
+      counts.bad  = dlCounts.bad;
+      badge.textContent = '📥 Download Mode';
+      badge.style.color = 'var(--primary)';
     }
+
+    if (wasReady !== sdReady) updateCounters();  // refresh bar saat mode berubah
   } catch (_) {}
 }
 
