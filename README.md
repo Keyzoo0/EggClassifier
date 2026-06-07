@@ -73,16 +73,25 @@ OV2640 Camera (RGB565 320×240)
 ```
 klasifikasiTelur_ESP32_S3_CAM/
 ├── README.md
-├── dokumentasi_proyek.md       # Riset mendalam arsitektur & pipeline
+├── dokumentasi_proyek.md          # Riset mendalam arsitektur & pipeline
 ├── docs/
-│   ├── dimesion.jpg            # Dimensi board FireBeetle 2
-│   └── schematic.jpg           # Skematik rangkaian
-├── CameraTest/                 # Arduino sketch — Phase 1
-│   └── CameraTest.ino          # Uji kamera: capture 5 frame, cek memori
-└── training/                   # (akan dibuat) Script Python training
-    ├── train.py
-    ├── convert_to_tflite.py
-    └── datasets/               # Tidak di-track git
+│   ├── dimesion.jpg               # Dimensi board FireBeetle 2
+│   └── schematic.jpg              # Skematik rangkaian
+├── CameraTest/                    # Phase 1 — Arduino sketch uji kamera
+│   └── CameraTest.ino
+├── DataCollector/                 # Phase 2 — Web server pengumpulan data
+│   ├── DataCollector.ino
+│   └── data/                      # LittleFS: index.html + app.js
+├── training/                      # Phase 3–4 — Training Python
+│   ├── train.py                   # Script training utama
+│   ├── requirements.txt
+│   ├── dataset/                   # Foto telur (tidak di-track git)
+│   └── models/                    # Output model (tidak di-track git)
+│       ├── egg_classifier_int8.tflite
+│       └── egg_model.h            # C array untuk Arduino
+└── EggClassifier/                 # Phase 5 — Inference firmware
+    ├── EggClassifier.ino
+    └── egg_model.h                # Salin dari training/models/
 ```
 
 ---
@@ -126,11 +135,64 @@ Buka sketch `CameraTest/CameraTest.ino`, lalu set di menu **Tools**:
 
 | Fase | Deskripsi | Status |
 |---|---|---|
-| **Phase 1** | Verifikasi hardware — camera test | 🔄 In Progress |
-| **Phase 2** | Data collection firmware (capture → WiFi → PC) | ⏳ Pending |
-| **Phase 3** | Pengumpulan dataset (300–500 foto/kelas) | ⏳ Pending |
-| **Phase 4** | Training model di PC (Python + TFLite int8) | ⏳ Pending |
-| **Phase 5** | Inference firmware lengkap | ⏳ Pending |
+| **Phase 1** | Verifikasi hardware — camera test | ✅ PASSED |
+| **Phase 2** | Data collection firmware (Web UI + LittleFS + mDNS) | ✅ DONE |
+| **Phase 3** | Pengumpulan dataset | ⚠️ 25 foto (target 300/kelas) |
+| **Phase 4** | Training MobileNetV1 α=0.25 INT8 → egg_model.h | ✅ DONE (100% val acc) |
+| **Phase 5** | Inference firmware (TFLite Micro on-device) | 🔄 In Progress |
+
+---
+
+## Phase 5 — Inference Firmware
+
+### Setup
+
+1. Buka sketch `EggClassifier/EggClassifier.ino` di Arduino IDE
+2. Pastikan `egg_model.h` ada di folder yang sama
+3. Install library via **Tools → Manage Libraries**:
+   - Cari `DFRobot_AXP313A` → install
+   - Cari `TensorFlowLite_ESP32` by tanakamasayuki → install
+4. Set Board Settings:
+
+| Pengaturan | Nilai |
+|---|---|
+| Board | `ESP32S3 Dev Module` |
+| Flash Size | `16MB (128Mb)` |
+| **Partition Scheme** | **`Huge APP (3MB No OTA/1MB SPIFFS)`** ← wajib! |
+| PSRAM | `OPI PSRAM` |
+| CPU Frequency | `240MHz` |
+| USB CDC On Boot | `Enabled` |
+
+> **Partition `Huge APP`** wajib karena model 315 KB + TFLite Micro library membutuhkan ruang app lebih besar dari default.
+
+### Penggunaan
+
+1. Upload sketch
+2. Buka Serial Monitor 115200
+3. Letakkan telur di depan kamera
+4. Tekan tombol **BOOT** atau kirim karakter `c` via Serial
+
+### Contoh Output Serial
+
+```
+=== Egg Classifier — Phase 5 Inference ===
+[OK] AXP313A: camera power on
+[OK] Camera: QQVGA 160×120 RGB565
+[OK] TFLite model loaded
+     Input  : [1,96,96,3] type=9
+     Arena  : 143 KB dipakai dari 200 KB
+[READY] Tekan tombol BOOT atau kirim 'c' untuk klasifikasi.
+
+─────────────────────────────────────────
+[CAM] Capturing...
+
+┌─────────────────────────────────┐
+│  Hasil    : BAGUS               │
+│  Score    : 0.872               │
+│  Keyakinan: TINGGI              │
+│  Waktu    : 64 ms               │
+└─────────────────────────────────┘
+```
 
 ---
 
