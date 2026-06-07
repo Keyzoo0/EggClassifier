@@ -2,27 +2,45 @@
  * Phase 2 — Data Collection Server
  * Board  : DFRobot FireBeetle 2 ESP32-S3 N16R8 (v1.0)
  *
- * Endpoint HTTP:
- *   GET /         → halaman preview live (auto-refresh di browser)
- *   GET /capture  → satu frame JPEG (dipakai Python script)
+ * Akses web:
+ *   http://telur.local       ← mDNS (Windows butuh Bonjour/iTunes)
+ *   http://<IP>              ← langsung via IP (lebih andal)
+ *
+ * Endpoint:
+ *   GET /          → halaman dashboard (dari LittleFS)
+ *   GET /app.js    → JavaScript (dari LittleFS)
+ *   GET /capture   → satu frame JPEG live
  *
  * Library yang harus terinstall:
  *   - DFRobot_AXP313A
  *
- * Arduino IDE Board Settings: sama seperti Phase 1
- *   Board: ESP32S3 Dev Module | Flash: 16MB | PSRAM: Disabled
- *   USB CDC On Boot: Enabled | CPU: 240MHz
+ * Upload filesystem (WAJIB sebelum pertama kali pakai):
+ *   1. Install plugin: https://github.com/earlephilhower/arduino-littlefs-upload
+ *      (Arduino IDE 2.x: letakkan .vsix di folder plugins, restart IDE)
+ *   2. Tools → ESP32 LittleFS Data Upload
+ *   3. Baru Upload sketch seperti biasa
+ *
+ * Arduino IDE Board Settings:
+ *   Board            : ESP32S3 Dev Module
+ *   Flash Size       : 16MB (128Mb)
+ *   Partition Scheme : Default 4MB with spiffs   ← ada SPIFFS/LittleFS-nya
+ *   PSRAM            : Disabled
+ *   CPU Frequency    : 240MHz
+ *   USB CDC On Boot  : Enabled
+ *   Upload Speed     : 921600
  */
 
 #include <Wire.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <ESPmDNS.h>
+#include <LittleFS.h>
 #include "DFRobot_AXP313A.h"
 #include "esp_camera.h"
 
 // === GANTI SESUAI JARINGAN ANDA ===
-#define WIFI_SSID "YOUR_SSID"
-#define WIFI_PASS "YOUR_PASSWORD"
+#define WIFI_SSID "sahrul"
+#define WIFI_PASS "12345678"
 // ==================================
 
 // Pin mapping FireBeetle 2 ESP32-S3 N16R8
@@ -46,66 +64,44 @@
 DFRobot_AXP313A axp;
 WebServer server(80);
 
-// Halaman preview live — gambar di-refresh tiap 800ms via JavaScript
-const char PAGE_HTML[] = R"(<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8">
-  <title>Egg Classifier - Preview</title>
-  <style>
-    body { background:#1a1a1a; color:#eee; font-family:sans-serif;
-           text-align:center; padding:30px; margin:0; }
-    h2   { color:#4CAF50; margin-bottom:6px; }
-    img  { max-width:640px; width:95%; border:3px solid #444;
-           border-radius:6px; margin:16px 0; }
-    p    { color:#888; font-size:14px; }
-    span { color:#4CAF50; font-weight:bold; }
-  </style>
-</head>
-<body>
-  <h2>Egg Classifier — Live Preview</h2>
-  <p>Gunakan Python script untuk capture dataset</p>
-  <img id="cam" src="/capture" alt="camera feed">
-  <p>Frame: <span id="cnt">0</span> | Status: <span id="status">OK</span></p>
-  <script>
-    var cnt = 0;
-    function refresh() {
-      var img = new Image();
-      img.onload = function() {
-        document.getElementById('cam').src = this.src;
-        document.getElementById('cnt').textContent = ++cnt;
-        document.getElementById('status').textContent = 'OK';
-      };
-      img.onerror = function() {
-        document.getElementById('status').textContent = 'ERROR';
-      };
-      img.src = '/capture?' + Date.now();
-    }
-    setInterval(refresh, 800);
-  </script>
-</body>
-</html>)";
-
-void handleRoot() {
-  server.send(200, "text/html", PAGE_HTML);
+// ── Filesystem helpers ────────────────────────────────────────
+String getContentType(const String& path) {
+  if (path.endsWith(".html")) return "text/html";
+  if (path.endsWith(".js"))   return "application/javascript";
+  if (path.endsWith(".css"))  return "text/css";
+  if (path.endsWith(".ico"))  return "image/x-icon";
+  return "text/plain";
 }
+
+void serveFile(const String& path) {
+  if (!LittleFS.exists(path)) {
+    server.send(404, "text/plain", "File tidak ditemukan: " + path);
+    return;
+  }
+  File f = LittleFS.open(path, "r");
+  server.streamFile(f, getContentType(path));
+  f.close();
+}
+
+// ── HTTP Handlers ─────────────────────────────────────────────
+void handleRoot()    { serveFile("/index.html"); }
+void handleAppJS()   { serveFile("/app.js"); }
 
 void handleCapture() {
   camera_fb_t* fb = esp_camera_fb_get();
   if (!fb) {
-    server.send(503, "text/plain", "Capture failed");
+    server.send(503, "text/plain", "Camera capture gagal");
     return;
   }
-
   server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
   server.sendHeader("Access-Control-Allow-Origin", "*");
   server.setContentLength(fb->len);
   server.send(200, "image/jpeg", "");
   server.client().write(fb->buf, fb->len);
-
   esp_camera_fb_return(fb);
 }
 
+// ── Camera Init ───────────────────────────────────────────────
 bool initCamera() {
   camera_config_t config;
   config.ledc_channel  = LEDC_CHANNEL_0;
@@ -128,8 +124,8 @@ bool initCamera() {
   config.pin_reset     = CAM_PIN_RESET;
   config.xclk_freq_hz  = 20000000;
   config.pixel_format  = PIXFORMAT_JPEG;
-  config.frame_size    = FRAMESIZE_QVGA;  // 320x240 — sama dgn resolusi inferensi
-  config.jpeg_quality  = 8;               // kualitas lebih tinggi untuk dataset
+  config.frame_size    = FRAMESIZE_QVGA;
+  config.jpeg_quality  = 8;
   config.fb_count      = 1;
   config.fb_location   = CAMERA_FB_IN_DRAM;
   config.grab_mode     = CAMERA_GRAB_LATEST;
@@ -142,13 +138,21 @@ bool initCamera() {
   return true;
 }
 
+// ── Setup ─────────────────────────────────────────────────────
 void setup() {
   Serial.begin(115200);
   delay(1000);
 
   Serial.println("\n=== FireBeetle 2 ESP32-S3 — Phase 2 Data Collection ===");
 
-  // AXP313A — wajib untuk board v1.0
+  // 1. LittleFS
+  if (!LittleFS.begin(true)) {
+    Serial.println("[ERROR] LittleFS gagal mount. Jalankan 'ESP32 LittleFS Data Upload' dulu.");
+    return;
+  }
+  Serial.println("[OK] LittleFS mounted");
+
+  // 2. AXP313A — wajib untuk board v1.0
   Wire.begin(CAM_PIN_SIOD, CAM_PIN_SIOC);
   if (axp.begin() != 0) {
     Serial.println("[ERROR] AXP313A tidak terdeteksi!");
@@ -158,7 +162,7 @@ void setup() {
   delay(100);
   Serial.println("[OK] AXP313A: camera power on");
 
-  // Camera
+  // 3. Camera
   if (!initCamera()) {
     Serial.println("[ERROR] Camera init gagal");
     return;
@@ -166,36 +170,43 @@ void setup() {
   delay(300);
   Serial.println("[OK] Camera ready");
 
-  // WiFi
+  // 4. WiFi
   Serial.printf("[..] Connecting to '%s'", WIFI_SSID);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
-  int timeout = 0;
-  while (WiFi.status() != WL_CONNECTED && timeout < 30) {
+  int t = 0;
+  while (WiFi.status() != WL_CONNECTED && t++ < 30) {
     delay(500);
     Serial.print(".");
-    timeout++;
   }
-
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("\n[ERROR] WiFi gagal terhubung. Cek SSID/Password.");
+    Serial.println("\n[ERROR] WiFi gagal. Cek SSID/Password.");
     return;
   }
-
   Serial.println("\n[OK] WiFi terhubung");
-  Serial.printf("\n╔══════════════════════════════════╗\n");
-  Serial.printf("║  Preview : http://%-15s║\n", (WiFi.localIP().toString() + "/").c_str());
-  Serial.printf("║  Capture : http://%-15s║\n", (WiFi.localIP().toString() + "/capture").c_str());
-  Serial.printf("╚══════════════════════════════════╝\n\n");
-  Serial.printf("Jalankan di PC:\n");
-  Serial.printf("  python training/collect_data.py --ip %s\n\n", WiFi.localIP().toString().c_str());
 
-  // HTTP server
-  server.on("/", handleRoot);
-  server.on("/capture", handleCapture);
+  // 5. mDNS
+  if (MDNS.begin("telur")) {
+    Serial.println("[OK] mDNS: http://telur.local");
+  } else {
+    Serial.println("[WARN] mDNS gagal start");
+  }
+
+  // 6. HTTP Server
+  server.on("/",          handleRoot);
+  server.on("/index.html",handleRoot);
+  server.on("/app.js",    handleAppJS);
+  server.on("/capture",   handleCapture);
   server.begin();
-  Serial.println("[OK] HTTP server running. Menunggu koneksi...");
+
+  Serial.println("[OK] HTTP server running\n");
+  Serial.println("╔══════════════════════════════════════╗");
+  Serial.printf( "║  http://telur.local                  ║\n");
+  Serial.printf( "║  http://%-30s║\n", (WiFi.localIP().toString() + "/").c_str());
+  Serial.println("╚══════════════════════════════════════╝");
 }
 
+// ── Loop ──────────────────────────────────────────────────────
 void loop() {
   server.handleClient();
+  MDNS.update();
 }
