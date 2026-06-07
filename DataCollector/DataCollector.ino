@@ -23,11 +23,16 @@
  * Arduino IDE Board Settings:
  *   Board            : ESP32S3 Dev Module
  *   Flash Size       : 16MB (128Mb)
- *   Partition Scheme : Default 4MB with spiffs   ← ada SPIFFS/LittleFS-nya
- *   PSRAM            : Disabled
+ *   Partition Scheme : Default 4MB with spiffs
+ *   PSRAM            : OPI PSRAM   ← ubah dari Disabled ke OPI PSRAM!
  *   CPU Frequency    : 240MHz
  *   USB CDC On Boot  : Enabled
  *   Upload Speed     : 921600
+ *
+ * Dengan OPI PSRAM aktif:
+ *   - Resolusi dataset naik ke VGA 640x480 (kualitas lebih baik untuk training)
+ *   - Frame buffer di PSRAM, DRAM bebas untuk WiFi + WebServer
+ *   - Double buffering untuk preview lebih smooth
  */
 
 #include <Wire.h>
@@ -103,6 +108,8 @@ void handleCapture() {
 
 // ── Camera Init ───────────────────────────────────────────────
 bool initCamera() {
+  bool hasPSRAM = (ESP.getPsramSize() > 0);
+
   camera_config_t config;
   config.ledc_channel  = LEDC_CHANNEL_0;
   config.ledc_timer    = LEDC_TIMER_0;
@@ -124,11 +131,23 @@ bool initCamera() {
   config.pin_reset     = CAM_PIN_RESET;
   config.xclk_freq_hz  = 20000000;
   config.pixel_format  = PIXFORMAT_JPEG;
-  config.frame_size    = FRAMESIZE_QVGA;
-  config.jpeg_quality  = 8;
-  config.fb_count      = 1;
-  config.fb_location   = CAMERA_FB_IN_DRAM;
   config.grab_mode     = CAMERA_GRAB_LATEST;
+
+  if (hasPSRAM) {
+    // PSRAM tersedia: resolusi tinggi + double buffer
+    config.frame_size   = FRAMESIZE_VGA;        // 640x480
+    config.jpeg_quality = 6;                    // kualitas tinggi (0-63, makin kecil makin bagus)
+    config.fb_count     = 2;                    // double buffering → preview lebih smooth
+    config.fb_location  = CAMERA_FB_IN_PSRAM;
+    Serial.printf("[OK] Camera mode: VGA 640x480, quality=6, 2 buffer (PSRAM)\n");
+  } else {
+    // Fallback tanpa PSRAM
+    config.frame_size   = FRAMESIZE_QVGA;       // 320x240
+    config.jpeg_quality = 8;
+    config.fb_count     = 1;
+    config.fb_location  = CAMERA_FB_IN_DRAM;
+    Serial.printf("[OK] Camera mode: QVGA 320x240, quality=8, 1 buffer (DRAM)\n");
+  }
 
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
@@ -144,6 +163,10 @@ void setup() {
   delay(1000);
 
   Serial.println("\n=== FireBeetle 2 ESP32-S3 — Phase 2 Data Collection ===");
+  Serial.printf("[INFO] Free DRAM : %lu KB\n", (unsigned long)(ESP.getFreeHeap() / 1024));
+  Serial.printf("[INFO] PSRAM     : %lu KB%s\n",
+                (unsigned long)(ESP.getPsramSize() / 1024),
+                ESP.getPsramSize() > 0 ? " ✓" : " (tidak aktif — set Tools→PSRAM→OPI PSRAM)");
 
   // 1. LittleFS
   if (!LittleFS.begin(true)) {
@@ -206,6 +229,6 @@ void setup() {
 }
 
 // ── Loop ──────────────────────────────────────────────────────
-void loop() {
+void loop() {  
   server.handleClient();
 }
