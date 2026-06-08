@@ -1,70 +1,94 @@
-# RANCANG BANGUN ALAT KLASIFIKASI TELUR BERDASARKAN TEKSTUR CANGKANG MENGGUNAKAN ESP-32 S3 CAM BERBASIS IOT
-
----
+# Rancang Bangun Alat Klasifikasi Telur Berdasarkan Tekstur Cangkang Menggunakan ESP-32 S3 CAM Berbasis IoT
 
 <div align="center">
 
-## LAPORAN TUGAS AKHIR
+**Tugas Akhir — Politeknik Negeri Sriwijaya**
 
-Laporan ini diajukan untuk memenuhi salah satu syarat Menyelesaikan  
-Pendidikan Program Diploma III Pada Jurusan  
-Teknik Komputer
+Muhammad Reka Alviandi · NIM 062330701499
 
-**Oleh :**
-
-**Muhammad Reka Alviandi**  
-**062330701499**
-
-**POLITEKNIK NEGERI SRIWIJAYA**  
-**PALEMBANG**  
-**2026**
+Jurusan Teknik Komputer · 2026
 
 </div>
 
 ---
 
-## Deskripsi Proyek
+## Deskripsi
 
-Sistem klasifikasi telur **on-device** (Bagus / Tidak Bagus) menggunakan kamera OV2640 dan inferensi TFLite Micro langsung di ESP32-S3 tanpa koneksi cloud.
+Sistem klasifikasi telur **on-device** yang mendeteksi kualitas cangkang telur (BAGUS / TIDAK BAGUS) secara real-time menggunakan kamera OV2640 dan model TFLite Micro yang berjalan langsung di ESP32-S3 — tanpa koneksi cloud. Pengguna mengakses antarmuka web melalui WiFi untuk melihat live preview kamera, mengumpulkan dataset, dan menjalankan inferensi.
 
 ---
 
 ## Hardware
 
-| Komponen | Detail |
+| Komponen | Spesifikasi |
 |---|---|
-| Board | DFRobot FireBeetle 2 ESP32-S3 N16R8 |
-| MCU | ESP32-S3 dual-core Xtensa LX7 @ 240 MHz |
+| Board | DFRobot FireBeetle 2 ESP32-S3 N16R8 v1.0 |
+| MCU | ESP32-S3 Dual-Core Xtensa LX7 @ 240 MHz |
 | Flash | 16 MB |
 | PSRAM | 8 MB Octal (OPI) |
-| Kamera | OV2640 2MP (onboard) |
+| Kamera | OV2640 2MP (onboard, via AXP313A) |
 
-### Dimensi Board
+<div align="center">
 
 ![Dimensi Board](docs/dimesion.jpg)
 
-### Skematik Rangkaian
+*Dimensi Board DFRobot FireBeetle 2 ESP32-S3*
+
+</div>
+
+<div align="center">
 
 ![Skematik Rangkaian](docs/schematic.jpg)
+
+*Skematik Rangkaian*
+
+</div>
 
 ---
 
 ## Arsitektur Sistem
 
 ```
-OV2640 Camera (RGB565 320×240)
-        ↓
-  Preprocessing (resize → 96×96, normalize → int8)
-        ↓
-  TFLite Micro Interpreter + ESP-NN
-  Model: MobileNetV1 96×96 α=0.25 INT8
-        ↓
-  Output: BAGUS / TIDAK BAGUS
-        ↓
-  LED / Serial / MQTT
+OV2640 (JPEG VGA 640×480)
+        │  live stream
+        ├─────────────────────────→  Web Browser (WiFi)
+        │  QQVGA 160×120 saat infer        ↕ HTTP API
+        ↓                          WebServer (Core 1)
+  JPEG decode → RGB888 (PSRAM)          │
+        ↓                               │ /predict
+  Center crop 96×96                     │
+        ↓                          inferTrigSem
+  Normalisasi → INT8 tensor             ↓
+        ↓                     Inference Task (Core 0)
+  TFLite Micro Interpreter          MicroInterpreter
+  MobileNetV1 α=0.25 INT8               │
+        ↓                          inferDoneSem
+  Output: BAGUS / TIDAK BAGUS           │
+        ↓                               ↓
+      LED indikator          JSON response → Browser
 ```
 
-**Target performa:** inferensi ~50–80 ms, akurasi >95%
+**Spesifikasi model:** MobileNetV1 α=0.25, input 96×96 RGB INT8, ~315 KB
+
+---
+
+## Preprocessing & Hasil Training
+
+<div align="center">
+
+![Preprocessing Dataset](docs/prepocessing%20dataset.png)
+
+*Pipeline preprocessing dataset: capture → resize 96×96 → augmentasi*
+
+</div>
+
+<div align="center">
+
+![Hasil Training](docs/trainResult.png)
+
+*Hasil training: Accuracy & Loss curve (Fase 1 head + Fase 2 fine-tune)*
+
+</div>
 
 ---
 
@@ -73,150 +97,161 @@ OV2640 Camera (RGB565 320×240)
 ```
 klasifikasiTelur_ESP32_S3_CAM/
 ├── README.md
-├── dokumentasi_proyek.md          # Riset mendalam arsitektur & pipeline
 ├── docs/
-│   ├── dimesion.jpg               # Dimensi board FireBeetle 2
-│   └── schematic.jpg              # Skematik rangkaian
-├── CameraTest/                    # Phase 1 — Arduino sketch uji kamera
-│   └── CameraTest.ino
-├── DataCollector/                 # Phase 2 — Web server pengumpulan data
-│   ├── DataCollector.ino
-│   └── data/                      # LittleFS: index.html + app.js
-├── training/                      # Phase 3–4 — Training Python
-│   ├── train.py                   # Script training utama
+│   ├── dimesion.jpg                   # Dimensi board FireBeetle 2
+│   ├── schematic.jpg                  # Skematik rangkaian
+│   ├── prepocessing dataset.png       # Pipeline preprocessing
+│   └── trainResult.png                # Kurva training
+├── CameraTest/
+│   └── CameraTest.ino                 # Uji kamera (Phase 1)
+├── DataCollector/
+│   └── DataCollector.ino              # Pengumpul dataset awal
+├── training/
+│   ├── KlasifikasiTelur_Training.ipynb  # Google Colab notebook
+│   ├── train.py                         # Script training lokal
 │   ├── requirements.txt
-│   ├── dataset/                   # Foto telur (tidak di-track git)
-│   └── models/                    # Output model (tidak di-track git)
-│       ├── egg_classifier_int8.tflite
-│       └── egg_model.h            # C array untuk Arduino
-└── EggClassifier/                 # Phase 5 — Inference firmware
-    ├── EggClassifier.ino
-    └── egg_model.h                # Salin dari training/models/
+│   └── dataset/                         # Foto telur (tidak di-track)
+└── EggClassifierV2/                   # ← Firmware utama
+    ├── EggClassifierV2.ino
+    └── data/                          # LittleFS — web interface
+        ├── index.html
+        ├── app.js
+        └── style.css
 ```
 
 ---
 
-## Cara Build & Flash (Arduino IDE)
+## Setup & Cara Pakai (EggClassifierV2)
 
-### Prasyarat
+### 1. Install Library (Arduino IDE → Tools → Manage Libraries)
 
-1. [Arduino IDE 2.x](https://www.arduino.cc/en/software)
-2. Tambahkan board ESP32 — buka **File → Preferences**, tambahkan URL berikut ke *Additional boards manager URLs*:
-   ```
-   https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
-   ```
-3. Buka **Tools → Board → Boards Manager**, cari `esp32` by Espressif, install.
+| Library | Author |
+|---|---|
+| `DFRobot_AXP313A` | DFRobot |
+| `TensorFlowLite_ESP32` | tanakamasayuki |
 
-### Konfigurasi Board di Arduino IDE
-
-Buka sketch `CameraTest/CameraTest.ino`, lalu set di menu **Tools**:
+### 2. Konfigurasi Board (Tools)
 
 | Pengaturan | Nilai |
 |---|---|
 | Board | `ESP32S3 Dev Module` |
 | Flash Size | `16MB (128Mb)` |
-| Partition Scheme | `Default 4MB with spiffs` |
-| PSRAM | `Disabled` |
-| CPU Frequency | `240MHz` |
-| **USB CDC On Boot** | **`Enabled`** ← wajib untuk Serial |
-| Upload Speed | `921600` |
-| Port | `/dev/ttyACM0` (Linux) atau `COMx` (Windows) |
-
-### Upload
-
-1. Sambungkan board via USB-C
-2. Pilih port yang benar di **Tools → Port**
-3. Klik **Upload (→)**
-4. Buka **Serial Monitor** (baud: 115200)
-
----
-
-## Status Fase Pengembangan
-
-| Fase | Deskripsi | Status |
-|---|---|---|
-| **Phase 1** | Verifikasi hardware — camera test | ✅ PASSED |
-| **Phase 2** | Data collection firmware (Web UI + LittleFS + mDNS) | ✅ DONE |
-| **Phase 3** | Pengumpulan dataset | ⚠️ 25 foto (target 300/kelas) |
-| **Phase 4** | Training MobileNetV1 α=0.25 INT8 → egg_model.h | ✅ DONE (100% val acc) |
-| **Phase 5** | Inference firmware (TFLite Micro on-device) | 🔄 In Progress |
-
----
-
-## Phase 5 — Inference Firmware
-
-### Setup
-
-1. Buka sketch `EggClassifier/EggClassifier.ino` di Arduino IDE
-2. Pastikan `egg_model.h` ada di folder yang sama
-3. Install library via **Tools → Manage Libraries**:
-   - Cari `DFRobot_AXP313A` → install
-   - Cari `TensorFlowLite_ESP32` by tanakamasayuki → install
-4. Set Board Settings:
-
-| Pengaturan | Nilai |
-|---|---|
-| Board | `ESP32S3 Dev Module` |
-| Flash Size | `16MB (128Mb)` |
-| **Partition Scheme** | **`Huge APP (3MB No OTA/1MB SPIFFS)`** ← wajib! |
+| **Partition Scheme** | **`Huge APP (3MB No OTA/1MB SPIFFS)`** ← wajib |
 | PSRAM | `OPI PSRAM` |
 | CPU Frequency | `240MHz` |
 | USB CDC On Boot | `Enabled` |
 
-> **Partition `Huge APP`** wajib karena model 315 KB + TFLite Micro library membutuhkan ruang app lebih besar dari default.
+### 3. Set WiFi Credentials
 
-### Penggunaan
-
-1. Upload sketch
-2. Buka Serial Monitor 115200
-3. Letakkan telur di depan kamera
-4. Tekan tombol **BOOT** atau kirim karakter `c` via Serial
-
-### Contoh Output Serial
-
+Edit di `EggClassifierV2.ino`:
+```cpp
+#define WIFI_SSID  "nama_wifi_kamu"
+#define WIFI_PASS  "password_wifi"
 ```
-=== Egg Classifier — Phase 5 Inference ===
-[OK] AXP313A: camera power on
-[OK] Camera: QQVGA 160×120 RGB565
-[OK] TFLite model loaded
-     Input  : [1,96,96,3] type=9
-     Arena  : 143 KB dipakai dari 200 KB
-[READY] Tekan tombol BOOT atau kirim 'c' untuk klasifikasi.
 
-─────────────────────────────────────────
-[CAM] Capturing...
+### 4. Upload Web Interface ke LittleFS
 
-┌─────────────────────────────────┐
-│  Hasil    : BAGUS               │
-│  Score    : 0.872               │
-│  Keyakinan: TINGGI              │
-│  Waktu    : 64 ms               │
-└─────────────────────────────────┘
+1. Install plugin **ESP32 Sketch Data Upload** untuk Arduino IDE 2.x:
+   - Download dari [lorol/arduino-esp32fs-plugin](https://github.com/lorol/arduino-esp32fs-plugin)
+   - Salin ke folder `tools/` di direktori Arduino
+2. Buka sketch `EggClassifierV2/EggClassifierV2.ino`
+3. **Tools → ESP32 Sketch Data Upload** → pilih LittleFS
+4. Tunggu sampai upload selesai
+
+### 5. Upload Firmware
+
+Klik **Upload (→)**, tunggu selesai, buka Serial Monitor 115200.
+
+### 6. Akses Web Interface
+
+Setelah board terhubung WiFi, buka browser:
 ```
+http://telur.local       ← via mDNS (Windows perlu Bonjour)
+http://<IP_ADDRESS>      ← IP tampil di Serial Monitor
+```
+
+### 7. Upload Model
+
+1. Jalankan training di Google Colab → download `egg_model.tflite`
+2. Di web interface → tab **Prediksi** → bagian **Model TFLite**
+3. Pilih file `egg_model.tflite` → klik **Upload & Aktifkan Model**
+4. Board restart otomatis, model tersimpan permanen di flash
 
 ---
 
-## Output Serial Monitor (Phase 1)
+## Web Interface
 
-```
-[CAM_TEST] === FireBeetle 2 ESP32-S3 N16R8 — Camera Test ===
-[CAM_TEST] Chip        : ESP32-S3, 2 core(s)
-[CAM_TEST] PSRAM total : 8192 KB
-[CAM_TEST] PSRAM free  : 8100 KB
-[CAM_TEST] SRAM free   : 350 KB
-[CAM_TEST] Kamera berhasil diinisialisasi
-[CAM_TEST] Frame 1: 320x240, 8456 bytes, 45.2 ms
-[CAM_TEST] Frame 2: 320x240, 8312 bytes, 44.8 ms
-[CAM_TEST] Frame 3: 320x240, 8391 bytes, 45.1 ms
-[CAM_TEST] Frame 4: 320x240, 8274 bytes, 44.9 ms
-[CAM_TEST] Frame 5: 320x240, 8318 bytes, 45.0 ms
-[CAM_TEST] Hasil: 5/5 frame berhasil
-[CAM_TEST] === PHASE 1 PASSED: Kamera berfungsi normal ===
-```
+### Tab Dataset — Kumpulkan Data
+
+| Aksi | Shortcut |
+|---|---|
+| Simpan foto BAGUS | Klik tombol hijau atau tekan `G` |
+| Simpan foto CACAT | Klik tombol merah atau tekan `B` |
+
+**Mode SD card:** foto tersimpan di SD card (`/dataset/good/`, `/dataset/bad/`)
+
+**Mode tanpa SD card:** foto langsung diunduh ke PC sebagai `good_0001.jpg`, `bad_0001.jpg`, dst.
+
+### Tab Prediksi — Klasifikasi Real-time
+
+| Aksi | Shortcut |
+|---|---|
+| Jalankan klasifikasi | Klik tombol biru atau tekan `C` |
+
+Output: label (BAGUS / TIDAK BAGUS), skor sigmoid, tingkat keyakinan, waktu inferensi.
 
 ---
 
-## Pin Mapping Kamera (FireBeetle 2 ESP32-S3)
+## API Endpoints
+
+| Method | Endpoint | Deskripsi |
+|---|---|---|
+| GET | `/` | Web interface utama |
+| GET | `/capture` | JPEG frame live dari kamera |
+| GET | `/predict` | Jalankan inferensi → JSON hasil |
+| GET | `/sd_stats` | Info SD card `{good, bad, free_mb, total_mb}` |
+| GET | `/save_image?label=good\|bad` | Capture & simpan ke SD card |
+| GET | `/model_info` | Status model `{loaded, size_kb}` |
+| POST | `/upload_model` | Upload file `.tflite` → LittleFS → restart |
+
+---
+
+## Training — Google Colab
+
+Buka notebook [`training/KlasifikasiTelur_Training.ipynb`](training/KlasifikasiTelur_Training.ipynb) di Google Colab.
+
+### Pipeline Training
+
+1. **Upload dataset** — ZIP dari PC atau salin dari Google Drive
+   - Format nama file: `good_0001.jpg`, `bad_0001.jpg`, dst.
+2. **Augmentasi** — flip, brightness, contrast, saturation, hue, crop-resize (×30 per epoch)
+3. **Fase 1** — Train head only (60 epoch, base MobileNetV1 frozen)
+4. **Fase 2** — Fine-tune 20 layer terakhir (40 epoch, lr=1e-5)
+5. **Konversi INT8** — full integer quantization, representative dataset
+6. **Generate** `egg_model.h` — download lalu copy ke folder sketch
+
+### Hasil Training (Dataset 25 foto)
+
+| Metrik | Fase 1 | Fase 2 |
+|---|---|---|
+| Best Val Accuracy | 100% | 100% |
+| Early Stopping | Epoch 23 | Epoch 16 |
+
+> ⚠️ Val accuracy 100% pada dataset 25 foto tidak menjamin performa di dunia nyata. **Target minimal 100 foto per kelas** untuk akurasi yang representatif.
+
+---
+
+## LED Indikator
+
+| Kondisi | LED |
+|---|---|
+| Booting / Connecting WiFi | Kedip cepat (250ms) |
+| WiFi terhubung | Menyala solid |
+| WiFi putus / reconnecting | Kedip cepat |
+
+---
+
+## Pin Mapping Kamera
 
 | Signal | GPIO |
 |---|---|
@@ -228,12 +263,32 @@ Buka sketch `CameraTest/CameraTest.ino`, lalu set di menu **Tools**:
 | HREF | 42 |
 | PCLK | 5 |
 
+## Wiring SD Card (Opsional)
+
+| SD | GPIO |
+|---|---|
+| SCK | 17 |
+| MOSI (MO) | 15 |
+| MISO (MI) | 16 |
+| CS | 10 |
+
+---
+
+## Status Pengembangan
+
+| Fase | Deskripsi | Status |
+|---|---|---|
+| Phase 1 | Verifikasi hardware — camera test | ✅ DONE |
+| Phase 2 | DataCollector — web UI + LittleFS | ✅ DONE |
+| Phase 3 | Pengumpulan dataset | ⚠️ 25 foto (target 100+/kelas) |
+| Phase 4 | Training MobileNetV1 α=0.25 INT8 | ✅ DONE |
+| Phase 5 | EggClassifierV2 — firmware + web + dual-core | ✅ DONE |
+
 ---
 
 ## Referensi
 
-- [esp-tflite-micro — Espressif](https://github.com/espressif/esp-tflite-micro)
-- [esp32-camera — Espressif](https://github.com/espressif/esp32-camera)
-- [ESP-NN optimized kernels](https://github.com/espressif/esp-nn)
 - [DFRobot FireBeetle 2 Wiki](https://wiki.dfrobot.com/SKU_DFR0975_FireBeetle_2_Board_ESP32_S3)
-- [Dokumentasi Riset Lengkap](./dokumentasi_proyek.md)
+- [esp32-camera — Espressif](https://github.com/espressif/esp32-camera)
+- [TensorFlowLite_ESP32 — tanakamasayuki](https://github.com/tanakamasayuki/Arduino_TensorFlowLite_ESP32)
+- [MobileNets — Howard et al.](https://arxiv.org/abs/1704.04861)
