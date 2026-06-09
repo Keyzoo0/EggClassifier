@@ -9,13 +9,16 @@ let frameCount    = 0;
 let previewOk     = false;
 let history       = [];
 let scoreChart    = null;
-let sdReady       = false;
 
-// Counter download mode — persisten di localStorage agar tidak reset saat refresh
+// Counter download — persisten di localStorage agar tidak reset saat refresh
 const dlCounts = {
   good: parseInt(localStorage.getItem('dl_good') || '0'),
   bad:  parseInt(localStorage.getItem('dl_bad')  || '0'),
 };
+
+// Init counters dari localStorage
+counts.good = dlCounts.good;
+counts.bad  = dlCounts.bad;
 
 // ─── Score Chart (Chart.js donut) ────────────────────────────
 function initChart() {
@@ -95,7 +98,7 @@ function setWifi(ok) {
 
 setInterval(refreshPreview, PREVIEW_MS);
 
-// ─── Dataset: capture & save / download ──────────────────────
+// ─── Dataset: capture → download langsung ke browser ─────────
 async function captureImage(label) {
   if (isCapturing) return;
   isCapturing = true;
@@ -103,63 +106,38 @@ async function captureImage(label) {
   btn.disabled = true;
 
   try {
-    if (sdReady) {
-      await _captureToSD(label);
-    } else {
-      await _captureToDownload(label);
-    }
+    const res = await fetch('/capture?t=' + Date.now());
+    if (!res.ok) throw new Error('Camera gagal (' + res.status + ')');
+    const blob = await res.blob();
+
+    dlCounts[label]++;
+    localStorage.setItem('dl_' + label, dlCounts[label]);
+
+    const n     = dlCounts[label];
+    const fname = label + '_' + String(n).padStart(4, '0') + '.jpg';
+
+    const url = URL.createObjectURL(blob);
+    const a   = document.createElement('a');
+    a.href     = url;
+    a.download = fname;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+
+    counts[label] = n;
+    updateCounters();
+    addThumb(label, n);
+    showToast(
+      (label === 'good' ? '✅ BAGUS' : '❌ CACAT') + ' #' + n + ' → ' + fname,
+      label
+    );
   } catch (e) {
     showToast('Error: ' + e.message, 'error');
   } finally {
     btn.disabled = false;
     isCapturing  = false;
   }
-}
-
-async function _captureToSD(label) {
-  const res  = await fetch('/save_image?label=' + label + '&t=' + Date.now());
-  const data = await res.json();
-  if (!res.ok || data.error) {
-    showToast('Gagal simpan SD: ' + (data.error || res.status), 'error');
-    return;
-  }
-  counts[label] = data.count;
-  updateCounters();
-  addThumb(label, data.count);
-  showToast(
-    (label === 'good' ? '✅ BAGUS' : '❌ CACAT') + ' #' + data.count + ' → SD card',
-    label
-  );
-}
-
-async function _captureToDownload(label) {
-  const res = await fetch('/capture?t=' + Date.now());
-  if (!res.ok) throw new Error('Camera gagal (' + res.status + ')');
-  const blob = await res.blob();
-
-  dlCounts[label]++;
-  localStorage.setItem('dl_' + label, dlCounts[label]);
-
-  const n     = dlCounts[label];
-  const fname = label + '_' + String(n).padStart(4, '0') + '.jpg';
-
-  // Trigger browser download
-  const url = URL.createObjectURL(blob);
-  const a   = document.createElement('a');
-  a.href     = url;
-  a.download = fname;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  setTimeout(() => URL.revokeObjectURL(url), 1500);
-
-  counts[label] = n;
-  updateCounters();
-  addThumb(label, n);
-  showToast(
-    (label === 'good' ? '✅ BAGUS' : '❌ CACAT') + ' #' + n + ' → ' + fname,
-    label
-  );
 }
 
 function updateCounters() {
@@ -179,38 +157,6 @@ function updateCounters() {
   }
 }
 
-// ─── SD Stats ─────────────────────────────────────────────────
-async function loadSDStats() {
-  try {
-    const res  = await fetch('/sd_stats');
-    const data = await res.json();
-    const wasReady = sdReady;
-    sdReady = data.ready;
-
-    document.getElementById('sd-warning').classList.toggle('hidden', data.ready);
-    document.getElementById('dl-mode-info').classList.toggle('hidden', data.ready);
-
-    const badge = document.getElementById('sd-badge');
-    if (data.ready) {
-      counts.good = data.good;
-      counts.bad  = data.bad;
-      badge.textContent = data.free_mb + ' MB bebas · total ' + data.total_mb + ' MB';
-      badge.style.color = 'var(--text-2)';
-    } else {
-      // Mode download: tampilkan counter dari localStorage
-      counts.good = dlCounts.good;
-      counts.bad  = dlCounts.bad;
-      badge.textContent = '📥 Download Mode';
-      badge.style.color = 'var(--primary)';
-    }
-
-    if (wasReady !== sdReady) updateCounters();  // refresh bar saat mode berubah
-  } catch (_) {}
-}
-
-loadSDStats();
-setInterval(loadSDStats, 10000);
-
 // ─── Thumbnails ───────────────────────────────────────────────
 function addThumb(label, n) {
   const grid  = document.getElementById('thumb-grid');
@@ -219,7 +165,7 @@ function addThumb(label, n) {
 
   const img = new Image();
   img.onload = () => {
-    const wrap = document.createElement('div');
+    const wrap  = document.createElement('div');
     wrap.className = 'thumb';
     const imgEl = document.createElement('img');
     imgEl.src = img.src;
@@ -282,30 +228,25 @@ function showResult(data) {
   const card = document.getElementById('result-card');
   card.classList.remove('hidden');
   card.classList.remove('result-reveal');
-  void card.offsetWidth;  // reflow to retrigger animation
+  void card.offsetWidth;
   card.classList.add('result-reveal');
 
-  // Donut chart
   updateChart(data.score, data.good);
 
-  // Pulse ring on chart wrap
   const wrap = document.getElementById('chart-wrap');
   wrap.classList.remove('ring-good', 'ring-bad');
   void wrap.offsetWidth;
   wrap.classList.add(data.good ? 'ring-good' : 'ring-bad');
 
-  // Score text
   const pct = (data.score * 100).toFixed(1);
   document.getElementById('result-score').textContent = pct + '%';
   document.getElementById('result-score').style.color =
     data.good ? 'var(--success)' : 'var(--danger)';
 
-  // Label
   const label = document.getElementById('result-label');
   label.textContent = data.label;
   label.style.color = data.good ? 'var(--success)' : 'var(--danger)';
 
-  // Confidence
   const confLevel =
     data.score > 0.85 || data.score < 0.15 ? 'TINGGI' :
     data.score > 0.70 || data.score < 0.30 ? 'SEDANG' : 'RENDAH';
@@ -315,7 +256,6 @@ function showResult(data) {
     confLevel === 'TINGGI' ? 'var(--success)' :
     confLevel === 'SEDANG' ? 'var(--warn)'    : 'var(--danger)';
 
-  // Time
   document.getElementById('result-time').textContent = data.time_ms + ' ms';
 
   showToast(
@@ -460,6 +400,7 @@ async function waitForRestart(maxWait = 15000) {
 }
 
 loadModelInfo();
+updateCounters();
 
 // ─── Drag-and-drop on dropzone ───────────────────────────────
 const dz = document.getElementById('dropzone-area');

@@ -1,5 +1,5 @@
 /*
- * EggClassifier V2 — Firmware Terpadu
+ * EggClassifier V2 — Firmware Terpadu (RTOS + PSRAM Optimized)
  * Board  : DFRobot FireBeetle 2 ESP32-S3 N16R8 v1.0
  *
  * Library (Tools → Manage Libraries):
@@ -14,21 +14,21 @@
  *   CPU Frequency    : 240MHz
  *   USB CDC On Boot  : Enabled
  *
- * SD Card Wiring:
- *   VCC → 3.3V  |  GND → GND
- *   SCK  → GPIO 17  (label board: SCK)
- *   MOSI → GPIO 15  (label board: MO)
- *   MISO → GPIO 16  (label board: MI)
- *   CS   → GPIO 10  (label board: D10, kanan bawah)
+ * Arsitektur dual-core:
+ *   Core 0 (prio 5) — inferenceTask: TFLite Invoke
+ *   Core 1 (prio 1) — loop(): WebServer.handleClient + LED
+ *
+ * PSRAM layout (~1.4 MB dari 8 MB tersedia):
+ *   rgbArena    640×480×3 = 921 KB  — decode JPEG→RGB888 (pre-alokasi)
+ *   tensorArena 200 KB              — TFLite working area
+ *   modelBuf    ~315 KB             — flat buffer model .tflite
  *
  * Endpoints:
- *   GET  /              → Web UI
- *   GET  /capture       → JPEG frame live
- *   GET  /sd_stats      → JSON: {good, bad, free_mb, total_mb}
- *   GET  /save_image    → query: ?label=good|bad → simpan ke SD, return JSON
+ *   GET  /              → Web UI (LittleFS)
+ *   GET  /capture       → JPEG frame live (preview & download dataset)
  *   GET  /predict       → inference → JSON hasil
- *   GET  /model_info    → JSON: {loaded, size_kb}
- *   POST /upload_model  → terima .tflite → simpan LittleFS → restart
+ *   GET  /model_info    → JSON: {loaded, size_kb, arena_kb}
+ *   POST /upload_model  → .tflite → LittleFS → restart
  */
 
 #include <Wire.h>
@@ -36,8 +36,6 @@
 #include <WebServer.h>
 #include <ESPmDNS.h>
 #include <LittleFS.h>
-#include <SD.h>
-#include <SPI.h>
 #include "DFRobot_AXP313A.h"
 #include "esp_camera.h"
 #include "img_converters.h"
@@ -51,8 +49,8 @@
 #include <freertos/semphr.h>
 
 // ── Credentials ───────────────────────────────────────────────
-#define WIFI_SSID  "Warmindo Samndut Suhat. 4G"
-#define WIFI_PASS  "Tanyakasir"
+#define WIFI_SSID  "ROSI1"
+#define WIFI_PASS  "20517420"
 
 // ── Pin Camera ────────────────────────────────────────────────
 #define CAM_PWDN   -1
@@ -72,52 +70,40 @@
 #define CAM_HREF   42
 #define CAM_PCLK    5
 
-// ── Pin SD Card (SPI2/HSPI) ───────────────────────────────────
-#define SD_CS    10
-#define SD_SCK   17
-#define SD_MOSI  15
-#define SD_MISO  16
-
 // ── Pin Board ─────────────────────────────────────────────────
-#define LED_PIN   21   // Onboard LED: solid=WiFi OK, blink=reconnecting
+#define LED_PIN   21   // solid=WiFi OK, blink=reconnecting
 #define BOOT_BTN   0
 
 // ── TFLite ────────────────────────────────────────────────────
-#define ARENA_SIZE (200 * 1024)  // 200 KB dari PSRAM
+#define ARENA_SIZE (200 * 1024)   // 200 KB dari PSRAM
 
-// ── Inferensi: QQVGA center crop ke 96×96 ─────────────────────
-#define INFER_W  160
-#define INFER_H  120
-#define CROP_SZ   96
-#define CROP_X   ((INFER_W - CROP_SZ) / 2)   // 32
-#define CROP_Y   ((INFER_H - CROP_SZ) / 2)   // 12
+// ── Kamera & Inferensi ────────────────────────────────────────
+// Camera selalu VGA; tidak pernah ganti resolusi saat inferensi.
+// Frame VGA di-scale nearest-neighbor → 96×96 di PSRAM buffer.
+#define RGB_MAX_W  640
+#define RGB_MAX_H  480
+#define CROP_SZ     96
 
 // ── Global ────────────────────────────────────────────────────
 DFRobot_AXP313A axp;
 WebServer        server(80);
-SPIClass         spiSD(HSPI);
 
-// TFLite — arena dari PSRAM (200KB terlalu besar untuk SRAM)
+// TFLite
 static uint8_t*                           tensorArena = nullptr;
 static tflite::MicroMutableOpResolver<10> resolver;
 static tflite::MicroErrorReporter        tfliteErrReporter;
 static tflite::MicroInterpreter*          interpreter = nullptr;
 static TfLiteTensor*                      inTensor    = nullptr;
 static TfLiteTensor*                      outTensor   = nullptr;
-bool   modelLoaded   = false;
-size_t modelSizeKB   = 0;
+bool   modelLoaded = false;
+size_t modelSizeKB = 0;
 
-// SD
-bool sdReady      = false;
-int  sdGoodCount  = 0;
-int  sdBadCount   = 0;
+// PSRAM decode buffer — pre-alokasi sekali, tidak malloc/free tiap inferensi
+static uint8_t* rgbArena = nullptr;
 
-// Flags
-volatile bool classifying    = false;   // volatile: dibaca dari 2 core
-bool          pendingRestart = false;
-uint32_t      restartAt      = 0;
+// Dual-core sync: inferensi di Core 0, HTTP di Core 1
+volatile bool classifying = false;
 
-// Dual-core: inferensi berjalan di Core 0, HTTP di Core 1
 struct InferResult {
   float    score;
   bool     good;
@@ -125,8 +111,8 @@ struct InferResult {
   bool     ok;
   char     err[32];
 };
-static SemaphoreHandle_t inferTrigSem    = NULL;  // Core1→Core0: mulai
-static SemaphoreHandle_t inferDoneSem    = NULL;  // Core0→Core1: selesai
+static SemaphoreHandle_t inferTrigSem    = NULL;
+static SemaphoreHandle_t inferDoneSem    = NULL;
 static TaskHandle_t      inferTaskHandle = NULL;
 static InferResult       inferResult;
 
@@ -148,20 +134,7 @@ void updateLED() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// WiFi auto-reconnect
-// ─────────────────────────────────────────────────────────────
-void checkWiFi() {
-  static uint32_t lastCheck = 0;
-  if (millis() - lastCheck < 5000) return;
-  lastCheck = millis();
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[WIFI] Putus, mencoba reconnect...");
-    WiFi.reconnect();
-  }
-}
-
-// ─────────────────────────────────────────────────────────────
-// Camera
+// Camera — VGA double-buffer di PSRAM, tidak pernah ganti resolusi
 // ─────────────────────────────────────────────────────────────
 bool initCamera() {
   camera_config_t cfg = {};
@@ -180,13 +153,11 @@ bool initCamera() {
   cfg.pin_reset    = CAM_RESET;
   cfg.xclk_freq_hz = 20000000;
   cfg.pixel_format = PIXFORMAT_JPEG;
-  cfg.grab_mode    = CAMERA_GRAB_LATEST;
-
-  bool hasPSRAM = (ESP.getPsramSize() > 0);
-  cfg.frame_size   = hasPSRAM ? FRAMESIZE_VGA  : FRAMESIZE_QVGA;
-  cfg.jpeg_quality = hasPSRAM ? 6              : 8;
-  cfg.fb_count     = hasPSRAM ? 2              : 1;
-  cfg.fb_location  = hasPSRAM ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
+  cfg.grab_mode    = CAMERA_GRAB_LATEST;  // selalu ambil frame terbaru
+  cfg.frame_size   = FRAMESIZE_VGA;       // 640×480, tidak pernah berubah
+  cfg.jpeg_quality = 6;
+  cfg.fb_count     = 2;                   // double-buffer di PSRAM
+  cfg.fb_location  = CAMERA_FB_IN_PSRAM;
 
   if (esp_camera_init(&cfg) != ESP_OK) {
     Serial.println("[ERROR] Camera init gagal");
@@ -198,41 +169,12 @@ bool initCamera() {
     s->set_contrast(s, 1);
     s->set_awb_gain(s, 1);
   }
-  Serial.printf("[OK] Camera: %s JPEG\n", hasPSRAM ? "VGA 640x480" : "QVGA 320x240");
+  Serial.println("[OK] Camera: VGA 640×480 JPEG double-buffer PSRAM");
   return true;
 }
 
 // ─────────────────────────────────────────────────────────────
-// SD Card
-// ─────────────────────────────────────────────────────────────
-int countFilesInDir(const char* path) {
-  File dir = SD.open(path);
-  if (!dir || !dir.isDirectory()) return 0;
-  int n = 0;
-  File f = dir.openNextFile();
-  while (f) { if (!f.isDirectory()) n++; f = dir.openNextFile(); }
-  return n;
-}
-
-bool initSD() {
-  spiSD.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
-  if (!SD.begin(SD_CS, spiSD)) {
-    Serial.println("[WARN] SD card tidak ditemukan");
-    return false;
-  }
-  SD.mkdir("/dataset");
-  SD.mkdir("/dataset/good");
-  SD.mkdir("/dataset/bad");
-  sdGoodCount = countFilesInDir("/dataset/good");
-  sdBadCount  = countFilesInDir("/dataset/bad");
-  Serial.printf("[OK] SD card: %d good, %d bad | %.0f MB bebas\n",
-    sdGoodCount, sdBadCount,
-    (float)(SD.totalBytes() - SD.usedBytes()) / 1024 / 1024);
-  return true;
-}
-
-// ─────────────────────────────────────────────────────────────
-// TFLite: load dari LittleFS → PSRAM
+// TFLite: load model dari LittleFS → PSRAM
 // ─────────────────────────────────────────────────────────────
 bool initTFLite() {
   if (!LittleFS.exists("/egg_model.tflite")) {
@@ -240,13 +182,12 @@ bool initTFLite() {
     return false;
   }
 
-  File f = LittleFS.open("/egg_model.tflite", "r");
+  File f  = LittleFS.open("/egg_model.tflite", "r");
   size_t sz = f.size();
   modelSizeKB = sz / 1024;
 
   uint8_t* buf = (uint8_t*) ps_malloc(sz);
   if (!buf) { f.close(); Serial.println("[TF] ps_malloc model gagal"); return false; }
-
   f.read(buf, sz);
   f.close();
 
@@ -256,14 +197,12 @@ bool initTFLite() {
     free(buf); return false;
   }
 
-  // Arena dari PSRAM — 200KB terlalu besar untuk SRAM
   if (!tensorArena) {
     tensorArena = (uint8_t*) ps_malloc(ARENA_SIZE);
     if (!tensorArena) { free(buf); Serial.println("[TF] ps_malloc arena gagal"); return false; }
   }
   memset(tensorArena, 0, ARENA_SIZE);
 
-  // ErrorReporter wajib diisi pada library ini
   static tflite::MicroInterpreter interp(
     model, resolver, tensorArena, ARENA_SIZE, &tfliteErrReporter
   );
@@ -279,8 +218,7 @@ bool initTFLite() {
   modelLoaded = true;
 
   Serial.printf("[OK] TFLite: %d KB | arena: %d KB | input [%d,%d,%d,%d]\n",
-    (int)modelSizeKB,
-    (int)(interpreter->arena_used_bytes() / 1024),
+    (int)modelSizeKB, (int)(interpreter->arena_used_bytes() / 1024),
     inTensor->dims->data[0], inTensor->dims->data[1],
     inTensor->dims->data[2], inTensor->dims->data[3]);
   return true;
@@ -300,7 +238,7 @@ void handleAppJS() { serveFile("/app.js",     "application/javascript"); }
 void handleCSS()   { serveFile("/style.css",  "text/css"); }
 
 // ─────────────────────────────────────────────────────────────
-// HTTP: capture JPEG live
+// HTTP: capture JPEG live — dipakai preview & download dataset
 // ─────────────────────────────────────────────────────────────
 void handleCapture() {
   if (classifying) { server.send(503, "text/plain", "busy"); return; }
@@ -315,195 +253,115 @@ void handleCapture() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// HTTP: simpan foto ke SD card
-// GET /save_image?label=good|bad
-// ─────────────────────────────────────────────────────────────
-void handleSaveImage() {
-  if (!sdReady) {
-    server.send(503, "application/json", "{\"error\":\"sd_not_ready\"}");
-    return;
-  }
-  String label = server.arg("label");
-  if (label != "good" && label != "bad") {
-    server.send(400, "application/json", "{\"error\":\"label harus good atau bad\"}");
-    return;
-  }
-
-  camera_fb_t* fb = esp_camera_fb_get();
-  if (!fb) { server.send(503, "application/json", "{\"error\":\"camera_failed\"}"); return; }
-
-  int* cnt = (label == "good") ? &sdGoodCount : &sdBadCount;
-  (*cnt)++;
-
-  char path[64];
-  snprintf(path, sizeof(path), "/dataset/%s/%s_%04d.jpg",
-           label.c_str(), label.c_str(), *cnt);
-
-  File f = SD.open(path, FILE_WRITE);
-  bool ok = false;
-  if (f) { f.write(fb->buf, fb->len); f.close(); ok = true; }
-  esp_camera_fb_return(fb);
-
-  if (ok) {
-    char resp[128];
-    snprintf(resp, sizeof(resp),
-      "{\"ok\":true,\"filename\":\"%s_%04d.jpg\",\"count\":%d}",
-      label.c_str(), *cnt, *cnt);
-    server.send(200, "application/json", resp);
-  } else {
-    (*cnt)--;
-    server.send(500, "application/json", "{\"error\":\"sd_write_failed\"}");
-  }
-}
-
-// ─────────────────────────────────────────────────────────────
-// HTTP: statistik SD card
-// ─────────────────────────────────────────────────────────────
-void handleSDStats() {
-  char resp[192];
-  if (sdReady) {
-    snprintf(resp, sizeof(resp),
-      "{\"good\":%d,\"bad\":%d,\"free_mb\":%llu,\"total_mb\":%llu,\"ready\":true}",
-      sdGoodCount, sdBadCount,
-      (unsigned long long)((SD.totalBytes() - SD.usedBytes()) / 1024 / 1024),
-      (unsigned long long)(SD.totalBytes() / 1024 / 1024));
-  } else {
-    snprintf(resp, sizeof(resp),
-      "{\"good\":0,\"bad\":0,\"free_mb\":0,\"total_mb\":0,\"ready\":false}");
-  }
-  server.send(200, "application/json", resp);
-}
-
-// ─────────────────────────────────────────────────────────────
 // HTTP: info model
 // ─────────────────────────────────────────────────────────────
 void handleModelInfo() {
-  char resp[96];
+  char resp[128];
   snprintf(resp, sizeof(resp),
-    "{\"loaded\":%s,\"size_kb\":%d}",
-    modelLoaded ? "true" : "false", (int)modelSizeKB);
+    "{\"loaded\":%s,\"size_kb\":%d,\"arena_kb\":%d}",
+    modelLoaded ? "true" : "false",
+    (int)modelSizeKB,
+    modelLoaded ? (int)(interpreter->arena_used_bytes() / 1024) : 0);
   server.send(200, "application/json", resp);
 }
 
 // ─────────────────────────────────────────────────────────────
-// Core 0 — inference task
-// Menunggu inferTrigSem dari Core 1, lakukan grab+decode+Invoke,
-// simpan hasil di inferResult, kirim inferDoneSem ke Core 1.
+// Inference worker — dipanggil di Core 0 oleh inferenceTask
+//
+// Optimasi vs versi sebelumnya:
+//   - Tidak ada ganti resolusi kamera → hemat ~160ms
+//   - Tidak ada warmup frame → hemat 2×40ms
+//   - rgbArena pre-alokasi di PSRAM → zero malloc/free
+//   - Scale nearest-neighbor seluruh frame → 96×96
+// ─────────────────────────────────────────────────────────────
+static void _runInference() {
+  InferResult r = {};
+
+  // Ambil frame VGA terbaru (kamera selalu stabil, tidak perlu warmup)
+  camera_fb_t* fb = esp_camera_fb_get();
+  if (!fb) {
+    snprintf(r.err, sizeof(r.err), "camera_failed");
+    inferResult = r; return;
+  }
+  if ((uint32_t)fb->width * fb->height * 3 > (uint32_t)RGB_MAX_W * RGB_MAX_H * 3) {
+    esp_camera_fb_return(fb);
+    snprintf(r.err, sizeof(r.err), "frame_too_large");
+    inferResult = r; return;
+  }
+
+  // Decode JPEG → RGB888 ke pre-alokasi PSRAM buffer
+  const bool conv = fmt2rgb888(fb->buf, fb->len, PIXFORMAT_JPEG, rgbArena);
+  const int  fbW  = (int)fb->width;
+  const int  fbH  = (int)fb->height;
+  esp_camera_fb_return(fb);
+
+  if (!conv) {
+    snprintf(r.err, sizeof(r.err), "decode_failed");
+    inferResult = r; return;
+  }
+
+  // Scale nearest-neighbor: fbW×fbH → CROP_SZ×CROP_SZ + kuantisasi INT8
+  // q = round(pixel/255 / inScale) + inZP
+  const float   inScale = inTensor->params.scale;
+  const int     inZP    = inTensor->params.zero_point;
+  int8_t* const dst     = inTensor->data.int8;
+
+  for (int dy = 0; dy < CROP_SZ; dy++) {
+    const int sy = dy * fbH / CROP_SZ;
+    for (int dx = 0; dx < CROP_SZ; dx++) {
+      const int sx = dx * fbW / CROP_SZ;
+      const int si = (sy * fbW + sx) * 3;
+      const int di = (dy * CROP_SZ + dx) * 3;
+      for (int c = 0; c < 3; c++) {
+        const int q = (int)(rgbArena[si + c] / (inScale * 255.0f) + 0.5f) + inZP;
+        dst[di + c] = (int8_t)(q < -128 ? -128 : q > 127 ? 127 : q);
+      }
+    }
+  }
+
+  // TFLite Invoke di Core 0
+  const uint32_t t0 = millis();
+  if (interpreter->Invoke() != kTfLiteOk) {
+    snprintf(r.err, sizeof(r.err), "invoke_failed");
+    inferResult = r; return;
+  }
+  r.time_ms = millis() - t0;
+
+  r.score = (outTensor->data.int8[0] - outTensor->params.zero_point)
+            * outTensor->params.scale;
+  r.good  = (r.score >= 0.5f);
+  r.ok    = true;
+
+  Serial.printf("[Core0] %s  score=%.3f  %lu ms\n",
+    r.good ? "BAGUS" : "TIDAK BAGUS", r.score, (unsigned long)r.time_ms);
+
+  inferResult = r;
+}
+
+// ─────────────────────────────────────────────────────────────
+// Core 0 — inference task: tunggu trigger, jalankan, kirim done
 // ─────────────────────────────────────────────────────────────
 void inferenceTask(void* pv) {
   (void)pv;
   while (true) {
     xSemaphoreTake(inferTrigSem, portMAX_DELAY);
-
-    InferResult r = {};
-
-    // Buang 2 frame awal agar AWB stabil (kamera sudah di QQVGA oleh Core 1)
-    for (int i = 0; i < 2; i++) {
-      camera_fb_t* d = esp_camera_fb_get();
-      if (d) esp_camera_fb_return(d);
-      vTaskDelay(pdMS_TO_TICKS(40));
-    }
-
-    camera_fb_t* fb = esp_camera_fb_get();
-
-    // Kembalikan framesize ke VGA sebelum decode agar live preview siap cepat
-    sensor_t* s = esp_camera_sensor_get();
-    if (s) s->set_framesize(s, FRAMESIZE_VGA);
-
-    if (!fb) {
-      snprintf(r.err, sizeof(r.err), "camera_failed");
-      inferResult = r;
-      xSemaphoreGive(inferDoneSem);
-      continue;
-    }
-
-    // ── Decode JPEG → RGB888 di PSRAM ────────────────────────
-    uint8_t* rgb = (uint8_t*) ps_malloc(INFER_W * INFER_H * 3);
-    if (!rgb) {
-      esp_camera_fb_return(fb);
-      snprintf(r.err, sizeof(r.err), "psram_full");
-      inferResult = r;
-      xSemaphoreGive(inferDoneSem);
-      continue;
-    }
-
-    bool conv = fmt2rgb888(fb->buf, fb->len, PIXFORMAT_JPEG, rgb);
-    esp_camera_fb_return(fb);
-
-    if (!conv) {
-      free(rgb);
-      snprintf(r.err, sizeof(r.err), "decode_failed");
-      inferResult = r;
-      xSemaphoreGive(inferDoneSem);
-      continue;
-    }
-
-    // ── Preprocess: center crop 96×96 → INT8 tensor ──────────
-    float  inScale = inTensor->params.scale;
-    int    inZP    = inTensor->params.zero_point;
-    int8_t* dst    = inTensor->data.int8;
-
-    for (int y = 0; y < CROP_SZ; y++) {
-      for (int x = 0; x < CROP_SZ; x++) {
-        int si = ((CROP_Y + y) * INFER_W + (CROP_X + x)) * 3;
-        int di = (y * CROP_SZ + x) * 3;
-        for (int c = 0; c < 3; c++) {
-          float f = rgb[si + c] / 255.0f;
-          dst[di + c] = (int8_t)constrain((int)roundf(f / inScale) + inZP, -128, 127);
-        }
-      }
-    }
-    free(rgb);
-
-    // ── TFLite Invoke ─────────────────────────────────────────
-    uint32_t t0 = millis();
-    TfLiteStatus st = interpreter->Invoke();
-    r.time_ms = millis() - t0;
-
-    if (st != kTfLiteOk) {
-      snprintf(r.err, sizeof(r.err), "invoke_failed");
-      inferResult = r;
-      xSemaphoreGive(inferDoneSem);
-      continue;
-    }
-
-    r.score = (outTensor->data.int8[0] - outTensor->params.zero_point)
-              * outTensor->params.scale;
-    r.good  = (r.score >= 0.5f);
-    r.ok    = true;
-
-    Serial.printf("[Core0] %s  score=%.3f  %lu ms\n",
-      r.good ? "BAGUS" : "TIDAK BAGUS", r.score, (unsigned long)r.time_ms);
-
-    inferResult = r;
+    _runInference();
     xSemaphoreGive(inferDoneSem);
   }
 }
 
 // ─────────────────────────────────────────────────────────────
-// HTTP: inferensi — Core 1 switch kamera, trigger Core 0, tunggu hasil
+// HTTP: jalankan inferensi (Core 1 trigger Core 0, tunggu hasil)
 // ─────────────────────────────────────────────────────────────
 void handlePredict() {
-  if (!modelLoaded) {
-    server.send(503, "application/json", "{\"error\":\"no_model\"}");
-    return;
-  }
-  if (classifying) {
-    server.send(503, "application/json", "{\"error\":\"busy\"}");
-    return;
-  }
+  if (!modelLoaded) { server.send(503, "application/json", "{\"error\":\"no_model\"}"); return; }
+  if (classifying)  { server.send(503, "application/json", "{\"error\":\"busy\"}"); return; }
 
   classifying = true;
+  xSemaphoreGive(inferTrigSem);  // bangunkan Core 0
 
-  // Switch ke QQVGA agar frame lebih kecil dan decode lebih cepat
-  sensor_t* s = esp_camera_sensor_get();
-  if (s) s->set_framesize(s, FRAMESIZE_QQVGA);
-  delay(80);   // tunggu sensor stabil
-
-  xSemaphoreGive(inferTrigSem);   // bangunkan Core 0
-
-  // Tunggu Core 0 selesai (max 8 detik: warm-up 2×40ms + decode + Invoke)
-  if (xSemaphoreTake(inferDoneSem, pdMS_TO_TICKS(8000)) != pdTRUE) {
+  // Timeout 5 detik (tidak ada warmup/switch resolusi)
+  if (xSemaphoreTake(inferDoneSem, pdMS_TO_TICKS(5000)) != pdTRUE) {
     classifying = false;
     server.send(503, "application/json", "{\"error\":\"timeout\"}");
     return;
@@ -527,7 +385,7 @@ void handlePredict() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// HTTP: upload model .tflite → LittleFS → restart
+// HTTP: upload model .tflite → LittleFS → restart otomatis
 // ─────────────────────────────────────────────────────────────
 void handleUploadDone() {
   if (uploadFile) uploadFile.close();
@@ -544,8 +402,7 @@ void handleUploadDone() {
     "{\"ok\":true,\"size_kb\":%d,\"restarting\":true}", (int)(sz / 1024));
   server.send(200, "application/json", resp);
 
-  // Beri waktu TCP kirim response, lalu restart
-  delay(800);
+  vTaskDelay(pdMS_TO_TICKS(800));  // beri waktu TCP kirim response
   Serial.println("[INFO] Model diupload, restart...");
   ESP.restart();
 }
@@ -568,13 +425,19 @@ void handleUploadChunk() {
 // ─────────────────────────────────────────────────────────────
 void setup() {
   Serial.begin(115200);
-  delay(1000);
+  vTaskDelay(pdMS_TO_TICKS(1000));
   Serial.println("\n╔══════════════════════════════════════╗");
   Serial.println("║    EggClassifier V2 — FireBeetle 2   ║");
+  Serial.println("║    RTOS + PSRAM Optimized            ║");
   Serial.println("╚══════════════════════════════════════╝");
   Serial.printf("[INFO] PSRAM: %lu KB | Heap: %lu KB\n",
     (unsigned long)(ESP.getPsramSize() / 1024),
     (unsigned long)(ESP.getFreeHeap() / 1024));
+
+  if (ESP.getPsramSize() == 0) {
+    Serial.println("[ERROR] PSRAM tidak aktif! Tools → PSRAM → OPI PSRAM");
+    return;
+  }
 
   pinMode(LED_PIN, OUTPUT);
   pinMode(BOOT_BTN, INPUT_PULLUP);
@@ -588,16 +451,19 @@ void setup() {
   Wire.begin(CAM_SIOD, CAM_SIOC);
   if (axp.begin() != 0) { Serial.println("[ERROR] AXP313A tidak ditemukan"); return; }
   axp.enableCameraPower(axp.eOV2640);
-  delay(100);
+  vTaskDelay(pdMS_TO_TICKS(100));
   Serial.println("[OK] AXP313A");
 
-  // 3. Kamera
+  // 3. Kamera — VGA double-buffer, tidak pernah berganti resolusi
   if (!initCamera()) return;
 
-  // 4. SD Card
-  sdReady = initSD();
+  // 4. Pre-alokasi PSRAM decode buffer (921 KB) — zero malloc/free saat inferensi
+  rgbArena = (uint8_t*) ps_malloc((size_t)RGB_MAX_W * RGB_MAX_H * 3);
+  if (!rgbArena) { Serial.println("[ERROR] ps_malloc rgbArena gagal"); return; }
+  Serial.printf("[OK] rgbArena: %d KB di PSRAM\n",
+    (int)((size_t)RGB_MAX_W * RGB_MAX_H * 3 / 1024));
 
-  // 5. TFLite (ops registrasi satu kali)
+  // 5. TFLite ops (registrasi satu kali sebelum load model)
   resolver.AddConv2D();
   resolver.AddDepthwiseConv2D();
   resolver.AddAveragePool2D();
@@ -608,27 +474,32 @@ void setup() {
   resolver.AddDequantize();
   initTFLite();
 
-  // 6. Dual-core: semaphore + inference task di Core 0
+  // 6. Dual-core: semaphore + inference task di Core 0 (prio 5)
   inferTrigSem = xSemaphoreCreateBinary();
   inferDoneSem = xSemaphoreCreateBinary();
   xTaskCreatePinnedToCore(
-    inferenceTask, "Infer", 16384, NULL, 2, &inferTaskHandle, 0
+    inferenceTask, "Infer", 16384, NULL, 5, &inferTaskHandle, 0
   );
-  Serial.println("[OK] Inference task → Core 0 (prio 2)");
+  Serial.println("[OK] Inference task → Core 0 (prio 5)");
 
-  // 7. WiFi
+  // 7. WiFi — event-driven reconnect (tidak perlu polling di loop)
+  WiFi.onEvent([](WiFiEvent_t event) {
+    if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+      WiFi.reconnect();
+    }
+  });
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   Serial.printf("[..] Connecting to '%s'", WIFI_SSID);
   for (int t = 0; t < 60 && WiFi.status() != WL_CONNECTED; t++) {
-    delay(250);
-    updateLED();           // LED kedip selama proses connecting
-    if (t % 2 == 0) Serial.print(".");  // titik tiap 500 ms
+    vTaskDelay(pdMS_TO_TICKS(250));
+    updateLED();
+    if (t % 2 == 0) Serial.print(".");
   }
   if (WiFi.status() == WL_CONNECTED) {
     Serial.printf("\n[OK] WiFi: http://%s\n", WiFi.localIP().toString().c_str());
     digitalWrite(LED_PIN, HIGH);
   } else {
-    Serial.println("\n[WARN] WiFi gagal — akan retry di loop");
+    Serial.println("\n[WARN] WiFi gagal — akan retry otomatis via event");
   }
 
   // 8. mDNS
@@ -640,8 +511,6 @@ void setup() {
   server.on("/app.js",       HTTP_GET,  handleAppJS);
   server.on("/style.css",    HTTP_GET,  handleCSS);
   server.on("/capture",      HTTP_GET,  handleCapture);
-  server.on("/save_image",   HTTP_GET,  handleSaveImage);
-  server.on("/sd_stats",     HTTP_GET,  handleSDStats);
   server.on("/predict",      HTTP_GET,  handlePredict);
   server.on("/model_info",   HTTP_GET,  handleModelInfo);
   server.on("/upload_model", HTTP_POST, handleUploadDone, handleUploadChunk);
@@ -653,16 +522,18 @@ void setup() {
   Serial.printf( "║  http://%-30s║\n",
     (WiFi.localIP().toString() + "/").c_str());
   Serial.println("╠══════════════════════════════════════╣");
-  Serial.printf( "║  Model : %-29s║\n", modelLoaded ? "Loaded ✓" : "Belum ada — upload via web");
-  Serial.printf( "║  SD    : %-29s║\n", sdReady ? "Ready ✓" : "Tidak terhubung ✗");
+  Serial.printf( "║  Model  : %-28s║\n",
+    modelLoaded ? "Loaded ✓" : "Belum ada — upload via web");
+  Serial.printf( "║  PSRAM  : %-28s║\n",
+    (String(ESP.getPsramSize() / 1024) + " KB total").c_str());
+  Serial.printf( "║  Dataset: %-28s║\n", "Download mode (via browser)");
   Serial.println("╚══════════════════════════════════════╝\n");
 }
 
 // ─────────────────────────────────────────────────────────────
-// Loop
+// Loop — Core 1: WebServer + LED. WiFi reconnect via event handler.
 // ─────────────────────────────────────────────────────────────
 void loop() {
   server.handleClient();
   updateLED();
-  checkWiFi();
 }

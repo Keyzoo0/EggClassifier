@@ -49,24 +49,31 @@ Sistem klasifikasi telur **on-device** yang mendeteksi kualitas cangkang telur (
 ## Arsitektur Sistem
 
 ```
-OV2640 (JPEG VGA 640×480)
-        │  live stream
+OV2640 (JPEG VGA 640×480 — tidak pernah berganti resolusi)
+        │  live stream / download dataset
         ├─────────────────────────→  Web Browser (WiFi)
-        │  QQVGA 160×120 saat infer        ↕ HTTP API
-        ↓                          WebServer (Core 1)
-  JPEG decode → RGB888 (PSRAM)          │
-        ↓                               │ /predict
-  Center crop 96×96                     │
-        ↓                          inferTrigSem
-  Normalisasi → INT8 tensor             ↓
-        ↓                     Inference Task (Core 0)
-  TFLite Micro Interpreter          MicroInterpreter
-  MobileNetV1 α=0.25 INT8               │
+        │  frame VGA langsung               ↕ HTTP API
+        ↓                          WebServer (Core 1 prio 1)
+  JPEG decode → RGB888             WiFi event reconnect
+  (rgbArena 921KB PSRAM)                   │
+        ↓                                  │ /predict
+  Scale nearest-neighbor               inferTrigSem
+  VGA → 96×96                             ↓
+        ↓                     Inference Task (Core 0 prio 5)
+  Kuantisasi → INT8 tensor          MicroInterpreter
+        ↓                           MobileNetV1 α=0.25
+  TFLite Invoke                          │
         ↓                          inferDoneSem
-  Output: BAGUS / TIDAK BAGUS           │
-        ↓                               ↓
+  Output: BAGUS / TIDAK BAGUS            │
+        ↓                                ↓
       LED indikator          JSON response → Browser
 ```
+
+**Optimasi RTOS + PSRAM:**
+- Tidak ada pergantian resolusi kamera → hemat ~160ms per inferensi
+- `rgbArena` 921KB pre-alokasi di PSRAM (zero malloc/free saat inferensi)
+- Inference task di Core 0 priority 5, WebServer di Core 1
+- WiFi reconnect via event handler (tidak polling di loop)
 
 **Spesifikasi model:** MobileNetV1 α=0.25, input 96×96 RGB INT8, ~315 KB
 
@@ -185,12 +192,12 @@ http://<IP_ADDRESS>      ← IP tampil di Serial Monitor
 
 | Aksi | Shortcut |
 |---|---|
-| Simpan foto BAGUS | Klik tombol hijau atau tekan `G` |
-| Simpan foto CACAT | Klik tombol merah atau tekan `B` |
+| Capture foto BAGUS | Klik tombol hijau atau tekan `G` |
+| Capture foto CACAT | Klik tombol merah atau tekan `B` |
 
-**Mode SD card:** foto tersimpan di SD card (`/dataset/good/`, `/dataset/bad/`)
-
-**Mode tanpa SD card:** foto langsung diunduh ke PC sebagai `good_0001.jpg`, `bad_0001.jpg`, dst.
+Foto langsung diunduh ke PC sebagai `good_0001.jpg`, `bad_0001.jpg`, dst.
+Counter tersimpan di `localStorage` browser sehingga tidak reset saat refresh.
+Pindahkan file ke folder dataset, lalu jalankan training di Google Colab.
 
 ### Tab Prediksi — Klasifikasi Real-time
 
@@ -207,11 +214,9 @@ Output: label (BAGUS / TIDAK BAGUS), skor sigmoid, tingkat keyakinan, waktu infe
 | Method | Endpoint | Deskripsi |
 |---|---|---|
 | GET | `/` | Web interface utama |
-| GET | `/capture` | JPEG frame live dari kamera |
-| GET | `/predict` | Jalankan inferensi → JSON hasil |
-| GET | `/sd_stats` | Info SD card `{good, bad, free_mb, total_mb}` |
-| GET | `/save_image?label=good\|bad` | Capture & simpan ke SD card |
-| GET | `/model_info` | Status model `{loaded, size_kb}` |
+| GET | `/capture` | JPEG frame live (untuk preview & download dataset) |
+| GET | `/predict` | Jalankan inferensi → JSON `{label, score, time_ms, good}` |
+| GET | `/model_info` | Status model `{loaded, size_kb, arena_kb}` |
 | POST | `/upload_model` | Upload file `.tflite` → LittleFS → restart |
 
 ---
@@ -263,17 +268,6 @@ Buka notebook [`training/KlasifikasiTelur_Training.ipynb`](training/KlasifikasiT
 | HREF | 42 |
 | PCLK | 5 |
 
-## Wiring SD Card (Opsional)
-
-| SD | GPIO |
-|---|---|
-| SCK | 17 |
-| MOSI (MO) | 15 |
-| MISO (MI) | 16 |
-| CS | 10 |
-
----
-
 ## Status Pengembangan
 
 | Fase | Deskripsi | Status |
@@ -283,6 +277,7 @@ Buka notebook [`training/KlasifikasiTelur_Training.ipynb`](training/KlasifikasiT
 | Phase 3 | Pengumpulan dataset | ⚠️ 25 foto (target 100+/kelas) |
 | Phase 4 | Training MobileNetV1 α=0.25 INT8 | ✅ DONE |
 | Phase 5 | EggClassifierV2 — firmware + web + dual-core | ✅ DONE |
+| Phase 6 | Optimasi RTOS + PSRAM — hapus SD, zero-alloc inference | ✅ DONE |
 
 ---
 
