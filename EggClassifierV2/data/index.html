@@ -22,78 +22,80 @@
 </head>
 <body>
 
-<!-- Top accent gradient line -->
-<div class="top-accent"></div>
+<div id="app-shell" class="app-shell">
 
-<!-- ── Header ──────────────────────────────────────────────── -->
-<header id="app-header" class="sticky top-0 z-30">
-  <div class="max-w-2xl mx-auto px-4 h-14 flex items-center justify-between">
-    <div class="flex items-center gap-3">
-      <div class="w-9 h-9 rounded-xl flex items-center justify-center text-base flex-shrink-0"
-           style="background:linear-gradient(135deg,#4f46e5,#7c3aed);box-shadow:0 0 16px rgba(99,102,241,0.4)">
-        🥚
-      </div>
-      <div>
-        <h1 class="text-sm font-bold leading-none tracking-tight">Egg Classifier</h1>
-        <p class="text-xs mt-0.5" style="color:var(--text-3);font-size:11px">
-          Freenove ESP32-S3 · N8R8 + SD
-        </p>
-      </div>
+<!-- ── Sidebar (collapsible) ────────────────────────────────── -->
+<aside id="sidebar">
+  <div class="sb-head">
+    <div class="sb-logo">🥚</div>
+    <div class="sb-title">
+      <h1>Egg Classifier</h1>
+      <p>Freenove ESP32-S3 · SD</p>
     </div>
-    <div class="flex items-center gap-2">
+  </div>
+
+  <nav class="sb-nav">
+    <button id="btn-dataset" class="sb-item active" onclick="switchTab('dataset')" title="Dataset (1)">
+      <span class="sb-ico">📷</span><span class="sb-label">Dataset</span>
+    </button>
+    <button id="btn-manage" class="sb-item" onclick="switchTab('manage')" title="Kelola (2)">
+      <span class="sb-ico">🗂️</span><span class="sb-label">Kelola</span>
+    </button>
+    <button id="btn-training" class="sb-item" onclick="switchTab('training')" title="Training (3)">
+      <span class="sb-ico">🚀</span><span class="sb-label">Training</span>
+    </button>
+    <button id="btn-predict" class="sb-item" onclick="switchTab('predict')" title="Prediksi (4)">
+      <span class="sb-ico">🔍</span><span class="sb-label">Prediksi</span>
+    </button>
+    <button id="btn-camera" class="sb-item" onclick="switchTab('camera')" title="Kamera (5)">
+      <span class="sb-ico">🎥</span><span class="sb-label">Kamera</span>
+    </button>
+  </nav>
+
+  <div class="sb-foot">
+    <div class="sb-wifi">
       <span id="wifi-dot" class="w-2 h-2 rounded-full flex-shrink-0"
             style="background:#334155"></span>
-      <span id="wifi-text" class="text-xs font-medium"
+      <span id="wifi-text" class="sb-label text-xs font-medium"
             style="color:var(--text-2)">Menghubungkan...</span>
     </div>
-  </div>
-</header>
-
-<!-- ── Camera Preview ───────────────────────────────────────── -->
-<div id="cam-wrap">
-  <img id="preview" src="/capture" alt="Live Preview"
-       onerror="previewError()" style="min-height:120px">
-
-  <div id="overlay-loading">
-    <div class="spinner"></div>
-    <span style="font-size:12px;color:var(--text-2)">Memuat kamera...</span>
-  </div>
-
-  <!-- Badges top-right -->
-  <div class="absolute top-2 right-2 flex gap-1.5">
-    <span id="frame-badge" class="cam-badge">
-      &#9654; <span id="frame-count">0</span>
-    </span>
-    <span id="busy-badge" class="cam-badge-busy hidden">
-      ⏳ Analisis...
-    </span>
-  </div>
-</div>
-
-<!-- ── Tab bar ──────────────────────────────────────────────── -->
-<div id="tab-bar" class="sticky z-20 px-4 py-3"
-     style="top:57px">
-  <div class="tab-pills max-w-md mx-auto">
-    <button id="btn-dataset" class="tab-pill active" onclick="switchTab('dataset')">
-      📷 &nbsp;Dataset
-    </button>
-    <button id="btn-manage" class="tab-pill" onclick="switchTab('manage')">
-      🗂️ &nbsp;Kelola
-    </button>
-    <button id="btn-training" class="tab-pill" onclick="switchTab('training')">
-      🚀 &nbsp;Training
-    </button>
-    <button id="btn-predict" class="tab-pill" onclick="switchTab('predict')">
-      🔍 &nbsp;Prediksi
-    </button>
-    <button id="btn-camera" class="tab-pill" onclick="switchTab('camera')">
-      🎥 &nbsp;Kamera
+    <button id="sb-toggle" class="sb-item" onclick="toggleSidebar()" title="Ciutkan / lebarkan">
+      <span class="sb-ico" id="sb-toggle-ico">⏴</span><span class="sb-label">Ciutkan</span>
     </button>
   </div>
-</div>
+</aside>
 
 <!-- ── Main ─────────────────────────────────────────────────── -->
-<main class="max-w-2xl mx-auto px-4 pt-4 pb-12 space-y-4">
+<div class="main">
+  <div class="top-accent"></div>
+
+  <div id="workspace" class="workspace">
+
+    <!-- Kolom kiri-atas: kamera (sticky di desktop) -->
+    <section id="cam-col">
+      <div id="cam-wrap">
+        <img id="preview" src="/capture" alt="Live Preview"
+             onerror="previewError()" style="min-height:120px">
+
+        <div id="overlay-loading">
+          <div class="spinner"></div>
+          <span style="font-size:12px;color:var(--text-2)">Memuat kamera...</span>
+        </div>
+
+        <!-- Badges top-right -->
+        <div class="absolute top-2 right-2 flex gap-1.5">
+          <span id="frame-badge" class="cam-badge">
+            &#9654; <span id="frame-count">0</span>
+          </span>
+          <span id="busy-badge" class="cam-badge-busy hidden">
+            ⏳ Analisis...
+          </span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Kolom kanan + bawah: isi tab -->
+    <section id="content-col" class="space-y-4">
 
 <!-- ═══════════════ TAB DATASET ════════════════════════════ -->
 <div id="tab-dataset" class="space-y-4">
@@ -425,7 +427,12 @@
 
 </div><!-- /tab-camera -->
 
-</main>
+    </section><!-- /content-col -->
+
+  </div><!-- /workspace -->
+</div><!-- /main -->
+
+</div><!-- /app-shell -->
 
 <!-- Toast container -->
 <div id="toast-container"

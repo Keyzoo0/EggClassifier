@@ -58,10 +58,10 @@ function switchTab(tab) {
     document.getElementById('tab-' + t).classList.toggle('hidden', t !== tab);
     document.getElementById('btn-' + t).classList.toggle('active', t === tab);
   });
-  // Tab Kelola & Training: preview kamera dimatikan (polling stop + area
-  // disembunyikan) agar bandwidth ESP32 fokus ke SD card / pipeline
+  // Tab Kelola & Training: preview kamera dimatikan (polling stop + kolom
+  // kamera disembunyikan, konten pakai seluruh lebar)
   const camOff = (tab === 'manage' || tab === 'training');
-  document.getElementById('cam-wrap').style.display = camOff ? 'none' : '';
+  document.getElementById('workspace').classList.toggle('no-cam', camOff);
   if (tab === 'predict' && !scoreChart) initChart();
   if (tab === 'camera' && !camLoaded) loadCamSettings();
   if (tab === 'manage') loadDatasetManager();
@@ -1099,6 +1099,18 @@ async function resetCamSettings() {
   } catch (e) {
     showToast('Error: ' + e.message, 'error');
   }
+}
+
+// ─── Sidebar collapse ─────────────────────────────────────────
+function toggleSidebar() {
+  const shell = document.getElementById('app-shell');
+  const collapsed = shell.classList.toggle('sb-collapsed');
+  localStorage.setItem('sb_collapsed', collapsed ? '1' : '0');
+  document.getElementById('sb-toggle-ico').textContent = collapsed ? '⏵' : '⏴';
+}
+if (localStorage.getItem('sb_collapsed') === '1') {
+  document.getElementById('app-shell').classList.add('sb-collapsed');
+  document.getElementById('sb-toggle-ico').textContent = '⏵';
 }
 
 // ─── Init ─────────────────────────────────────────────────────
