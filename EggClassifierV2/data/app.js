@@ -58,17 +58,20 @@ function switchTab(tab) {
     document.getElementById('tab-' + t).classList.toggle('hidden', t !== tab);
     document.getElementById('btn-' + t).classList.toggle('active', t === tab);
   });
-  // Tab Kelola: preview kamera dimatikan (polling stop + area disembunyikan)
-  // agar bandwidth ESP32 fokus melayani foto-foto dari SD card
-  document.getElementById('cam-wrap').style.display = (tab === 'manage') ? 'none' : '';
+  // Tab Kelola & Training: preview kamera dimatikan (polling stop + area
+  // disembunyikan) agar bandwidth ESP32 fokus ke SD card / pipeline
+  const camOff = (tab === 'manage' || tab === 'training');
+  document.getElementById('cam-wrap').style.display = camOff ? 'none' : '';
   if (tab === 'predict' && !scoreChart) initChart();
   if (tab === 'camera' && !camLoaded) loadCamSettings();
   if (tab === 'manage') loadDatasetManager();
+  if (tab === 'training') loadSDInfo();   // refresh angka dataset
 }
 
 // ─── Live Preview ─────────────────────────────────────────────
 function refreshPreview() {
-  if (isClassifying || activeTab === 'manage') return;  // kamera off di tab Kelola
+  // Kamera off di tab Kelola & Training
+  if (isClassifying || activeTab === 'manage' || activeTab === 'training') return;
   const tmp = new Image();
   tmp.onload = () => {
     document.getElementById('preview').src = tmp.src;
@@ -192,6 +195,13 @@ async function loadSDInfo() {
         'SD card tidak terdeteksi — foto diunduh ke PC. Pasang microSD ' +
         '(FAT32) lalu restart alat untuk menyimpan dataset di alat.';
     }
+
+    // Angka dataset di tab Training (pengganti preview kamera)
+    document.getElementById('train-good').textContent = counts.good;
+    document.getElementById('train-bad').textContent  = counts.bad;
+    document.getElementById('train-total').textContent =
+      (counts.good + counts.bad) + ' foto total' +
+      (sdMounted ? ' · SD ' + data.used_mb + '/' + data.total_mb + ' MB' : '');
   } catch (_) {}
 }
 

@@ -214,6 +214,9 @@ foto yang dihapus di SD juga dihapus dari repo (SD = sumber kebenaran).
 
 ### Tab Training — Pipeline Otomatis (`3`)
 
+Preview kamera dimatikan di tab ini; sebagai gantinya tampil ringkasan dataset
+(jumlah foto BAGUS / CACAT + pemakaian SD).
+
 Satu tombol **"Sinkron + Training + Pasang Model"** menjalankan seluruh pipeline:
 
 1. **Sinkron** — foto baru di SD diunggah browser ke folder `dataset/` repo GitHub

@@ -222,6 +222,25 @@
 <!-- ═══════════════ TAB TRAINING ═══════════════════════════ -->
 <div id="tab-training" class="hidden space-y-4">
 
+  <!-- Ringkasan dataset — pengganti preview kamera (dimatikan di tab ini) -->
+  <div class="card p-4">
+    <div class="flex items-center justify-between mb-3">
+      <h3 class="text-sm font-semibold" style="color:var(--text-1)">Dataset Siap Training</h3>
+      <span class="text-xs" style="color:var(--text-3)">📵 kamera off</span>
+    </div>
+    <div class="grid grid-cols-2 gap-3">
+      <div class="stat-box stat-good">
+        <span id="train-good" class="stat-num">0</span>
+        <span class="stat-label">✅ BAGUS</span>
+      </div>
+      <div class="stat-box stat-bad">
+        <span id="train-bad" class="stat-num">0</span>
+        <span class="stat-label">❌ CACAT</span>
+      </div>
+    </div>
+    <p id="train-total" class="text-xs text-center mt-3" style="color:var(--text-3)"></p>
+  </div>
+
   <!-- Pipeline: satu tombol, full otomatis -->
   <div class="card p-4 space-y-3">
     <h3 class="text-sm font-semibold" style="color:var(--text-1)">Training Otomatis — GitHub Actions</h3>
