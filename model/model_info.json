@@ -1,0 +1,9 @@
+{
+  "val_accuracy": 1.0,
+  "size_kb": 315.5,
+  "n_good": 11,
+  "n_bad": 11,
+  "alpha": 0.25,
+  "img_size": 96,
+  "trained_at": "2026-06-12 16:55 UTC"
+}
