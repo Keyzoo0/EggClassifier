@@ -52,26 +52,28 @@ function updateChart(score, isGood) {
 }
 
 // ─── Tab switching ────────────────────────────────────────────
+// Tab tanpa preview kamera: polling stop + kolom kamera disembunyikan,
+// konten pakai seluruh lebar — hemat bandwidth ESP32 (server single-thread)
+const NO_CAM_TABS = ['manage', 'training', 'system'];
+
 function switchTab(tab) {
   activeTab = tab;
-  ['dataset', 'manage', 'training', 'predict', 'camera'].forEach(t => {
+  ['dataset', 'manage', 'training', 'predict', 'camera', 'system'].forEach(t => {
     document.getElementById('tab-' + t).classList.toggle('hidden', t !== tab);
     document.getElementById('btn-' + t).classList.toggle('active', t === tab);
   });
-  // Tab Kelola & Training: preview kamera dimatikan (polling stop + kolom
-  // kamera disembunyikan, konten pakai seluruh lebar)
-  const camOff = (tab === 'manage' || tab === 'training');
-  document.getElementById('workspace').classList.toggle('no-cam', camOff);
+  document.getElementById('workspace').classList.toggle('no-cam', NO_CAM_TABS.includes(tab));
   if (tab === 'predict' && !scoreChart) initChart();
   if (tab === 'camera' && !camLoaded) loadCamSettings();
   if (tab === 'manage') loadDatasetManager();
   if (tab === 'training') loadSDInfo();   // refresh angka dataset
+  if (tab === 'system') { loadSysInfo(); loadPredictLog(); }
 }
 
 // ─── Live Preview ─────────────────────────────────────────────
 function refreshPreview() {
-  // Kamera off di tab Kelola & Training
-  if (isClassifying || activeTab === 'manage' || activeTab === 'training') return;
+  // Kamera off di tab Kelola, Training & Sistem
+  if (isClassifying || NO_CAM_TABS.includes(activeTab)) return;
   const tmp = new Image();
   tmp.onload = () => {
     document.getElementById('preview').src = tmp.src;
@@ -1101,6 +1103,167 @@ async function resetCamSettings() {
   }
 }
 
+// ═══════════════════════════════════════════════════════════
+//  SISTEM — statistik memori, OTA firmware, update web UI,
+//  dan log prediksi (CSV di SD card)
+// ═══════════════════════════════════════════════════════════
+function sysBar(label, used, total, unit) {
+  const pct = total ? Math.min(100, used / total * 100) : 0;
+  return '<div class="space-y-1">' +
+    '<div class="flex justify-between items-baseline">' +
+      '<span class="text-xs font-semibold" style="color:var(--text-2)">' + label + '</span>' +
+      '<span class="text-xs font-mono" style="color:var(--text-3)">' +
+        used + ' / ' + total + ' ' + unit + '</span>' +
+    '</div>' +
+    '<div class="bar-track"><div class="bar-upload" style="width:' +
+      pct.toFixed(1) + '%"></div></div>' +
+    '</div>';
+}
+
+async function loadSysInfo() {
+  const box = document.getElementById('sys-meters');
+  try {
+    const res = await fetch('/sys/info?t=' + Date.now());
+    const d   = await res.json();
+    box.innerHTML =
+      sysBar('SRAM internal terpakai', d.heap_total_kb - d.heap_kb, d.heap_total_kb, 'KB') +
+      sysBar('PSRAM terpakai', d.psram_kb - d.psram_free_kb, d.psram_kb, 'KB') +
+      sysBar('LittleFS — web UI + model', d.lfs_used_kb, d.lfs_kb, 'KB') +
+      sysBar('SD card — dataset + log', d.sd_used_mb, d.sd_mb, 'MB');
+    document.getElementById('sys-detail').innerHTML =
+      'Firmware <b>v' + d.fw + '</b> (' + d.built + ') · partisi <b>' + d.part + '</b> · OTA: ' +
+      (d.ota ? '<b style="color:var(--success)">siap</b>'
+             : '<b style="color:var(--warn)">tidak tersedia — ganti partition scheme ke Default 16MB</b>') +
+      '<br>Model dari <b>' + d.model_loc + '</b> · tensor arena di <b>' +
+      (d.arena_loc === 'sram' ? 'SRAM internal ⚡' : 'PSRAM') + '</b>' +
+      '<br>WiFi ' + d.rssi + ' dBm · uptime ' + Math.floor(d.uptime_s / 60) + ' mnt · ' +
+      'SRAM terendah ' + d.heap_min_kb + ' KB bebas';
+  } catch (e) {
+    box.innerHTML = '<p class="text-xs text-center py-4" style="color:var(--danger)">' +
+                    'Gagal memuat: ' + e.message + '</p>';
+  }
+}
+
+// ─── OTA firmware via web — tanpa kabel USB ──────────────────
+async function otaUpload(input) {
+  const file = input.files[0];
+  input.value = '';
+  if (!file) return;
+  if (!/\.bin$/i.test(file.name)) { showToast('Pilih file .bin hasil Export Compiled Binary', 'error'); return; }
+  if (!confirm('Flash firmware "' + file.name + '" (' + Math.round(file.size / 1024) +
+               ' KB) ke alat?\nAlat akan restart setelah selesai.')) return;
+
+  const prog = document.getElementById('ota-progress');
+  const stat = document.getElementById('ota-status');
+  const btn  = document.getElementById('ota-btn');
+  prog.classList.remove('hidden');
+  btn.disabled = true;
+
+  try {
+    const fd = new FormData();
+    fd.append('firmware', file);
+    const result = await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.upload.onprogress = e => {
+        if (e.lengthComputable) {
+          const p = Math.round(e.loaded / e.total * 100);
+          document.getElementById('ota-fill').style.width = p + '%';
+          stat.textContent = 'Mengirim firmware… ' + p + '% — jangan matikan alat!';
+        }
+      };
+      xhr.onload  = () => {
+        try { resolve(JSON.parse(xhr.responseText)); }
+        catch { resolve({ ok: false, error: 'respons tidak valid' }); }
+      };
+      xhr.onerror = () => reject(new Error('koneksi ke alat terputus'));
+      xhr.open('POST', '/ota');
+      xhr.send(fd);
+    });
+    if (!result.ok) throw new Error(result.error || '?');
+
+    stat.textContent = '✅ Sukses! Alat restart dengan firmware baru…';
+    showToast('✅ OTA sukses — alat restart', 'good');
+    await waitForRestart(25000);
+    loadSysInfo();
+    loadModelInfo();
+  } catch (e) {
+    stat.textContent = '❌ ' + e.message;
+    showToast('OTA gagal: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ─── Update file web UI → LittleFS (pengganti plugin uploader) ─
+async function uiUpload(input) {
+  const files = [...input.files];
+  input.value = '';
+  if (!files.length) return;
+
+  const stat = document.getElementById('ui-status');
+  stat.classList.remove('hidden');
+  let ok = 0;
+
+  for (let i = 0; i < files.length; i++) {
+    stat.textContent = 'Upload ' + (i + 1) + '/' + files.length + ': ' + files[i].name;
+    try {
+      const fd = new FormData();
+      fd.append('file', files[i]);
+      const res  = await fetch('/fs/upload', { method: 'POST', body: fd });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || res.status);
+      ok++;
+    } catch (e) {
+      showToast(files[i].name + ' gagal: ' + e.message, 'error');
+    }
+  }
+
+  stat.textContent = '✅ ' + ok + '/' + files.length + ' file terpasang';
+  loadSysInfo();
+  if (ok && files.some(f => /\.(html|js|css)$/i.test(f.name))) {
+    showToast('✅ Web UI diperbarui — memuat ulang…', 'good');
+    setTimeout(() => location.reload(), 1200);
+  }
+}
+
+// ─── Log prediksi dari SD card ───────────────────────────────
+async function loadPredictLog() {
+  const box = document.getElementById('predict-log');
+  try {
+    const res = await fetch('/log?tail=1&t=' + Date.now());
+    if (res.status === 404) { box.textContent = 'Belum ada prediksi tercatat.'; return; }
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const lines = (await res.text()).trim().split('\n')
+      .filter(l => l.includes(',') && !l.startsWith('waktu,'));
+    if (!lines.length) { box.textContent = 'Belum ada prediksi tercatat.'; return; }
+
+    box.innerHTML = lines.slice(-50).reverse().map(l => {
+      const c    = l.split(',');
+      const good = c[1] === 'BAGUS';
+      return '<div class="log-row">' +
+        '<span style="color:var(--text-3)">' + c[0] + '</span>' +
+        '<span style="font-weight:700;color:' +
+          (good ? 'var(--success)' : 'var(--danger)') + '">' + c[1] + '</span>' +
+        '<span class="font-mono">' + (parseFloat(c[2]) * 100).toFixed(1) + '%</span>' +
+        '<span style="color:var(--text-3)">' + c[3] + ' ms</span>' +
+        '</div>';
+    }).join('');
+  } catch (e) {
+    box.textContent = 'Gagal memuat log: ' + e.message;
+  }
+}
+
+async function clearPredictLog() {
+  if (!confirm('Hapus seluruh log prediksi di SD card?')) return;
+  try {
+    await fetch('/log/clear', { method: 'POST' });
+    loadPredictLog();
+    showToast('🗑️ Log prediksi dihapus', 'good');
+  } catch (e) {
+    showToast('Gagal: ' + e.message, 'error');
+  }
+}
+
 // ─── Sidebar collapse ─────────────────────────────────────────
 function toggleSidebar() {
   const shell = document.getElementById('app-shell');
@@ -1145,4 +1308,5 @@ document.addEventListener('keydown', e => {
   if (k === '3') switchTab('training');
   if (k === '4') switchTab('predict');
   if (k === '5') switchTab('camera');
+  if (k === '6') switchTab('system');
 });
