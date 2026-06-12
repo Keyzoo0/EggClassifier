@@ -22,9 +22,9 @@ Sistem klasifikasi telur **on-device** yang mendeteksi kualitas cangkang telur (
 
 | Komponen | Spesifikasi |
 |---|---|
-| Board | Freenove ESP32-S3-WROOM CAM (FNK0085) |
+| Board | Freenove ESP32-S3-WROOM CAM (FNK0085, varian N16R8) |
 | MCU | ESP32-S3 Dual-Core Xtensa LX7 @ 240 MHz |
-| Flash | 8 MB |
+| Flash | 16 MB (terdeteksi esptool) |
 | PSRAM | 8 MB Octal (OPI) |
 | Kamera | OV2640 2MP FOV 66.5° (onboard, selalu berdaya — tanpa AXP) |
 | Penyimpanan | microSD 4 GB, FAT32 (allocation unit 16K), SDMMC 1-bit |
@@ -139,8 +139,8 @@ klasifikasiTelur_ESP32_S3_CAM/
 | Pengaturan | Nilai |
 |---|---|
 | Board | `ESP32S3 Dev Module` |
-| Flash Size | `8MB (64Mb)` ← Freenove = 8MB, bukan 16MB |
-| **Partition Scheme** | **`8M with spiffs (3MB APP/1.5MB SPIFFS)`** ← wajib |
+| Flash Size | `16MB (128Mb)` |
+| **Partition Scheme** | **`Huge APP (3MB No OTA/1MB SPIFFS)`** ← wajib |
 | PSRAM | `OPI PSRAM` |
 | CPU Frequency | `240MHz` |
 | USB CDC On Boot | `Enabled` |
@@ -178,7 +178,9 @@ http://<IP_ADDRESS>      ← IP tampil di Serial Monitor
 
 Model dipasang dari tab **🚀 Training** (satu pintu):
 jalankan pipeline penuh, atau klik **"Pasang Model Ini ke Alat"** pada kartu
-Model Terakhir di GitHub. Board restart otomatis dan model tersimpan permanen di flash.
+Model Terakhir di GitHub. Board restart otomatis dan model tersimpan di **SD card**
+(fallback LittleFS bila SD tidak terpasang) — tahan terhadap upload ulang LittleFS
+yang menimpa seluruh partisi web.
 
 > Untuk model dari luar pipeline (mis. hasil Colab), gunakan endpoint langsung:
 > `curl -F "model=@egg_model.tflite" http://telur.local/upload_model`

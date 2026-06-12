@@ -8,8 +8,8 @@
  *
  * Board Settings (Tools):
  *   Board            : ESP32S3 Dev Module
- *   Flash Size       : 8MB (64Mb)                        ← Freenove = 8MB!
- *   Partition Scheme : 8M with spiffs (3MB APP/1.5MB SPIFFS)
+ *   Flash Size       : 16MB (128Mb)   ← board ini varian N16R8 (esptool detect 16MB)
+ *   Partition Scheme : Huge APP (3MB No OTA/1MB SPIFFS)
  *   PSRAM            : OPI PSRAM
  *   CPU Frequency    : 240MHz
  *   USB CDC On Boot  : Enabled
@@ -30,8 +30,8 @@
  *   GET  /              → Web UI (LittleFS)
  *   GET  /capture       → JPEG frame live (preview & download dataset)
  *   GET  /predict       → inference → JSON hasil
- *   GET  /model_info    → JSON: {loaded, size_kb, arena_kb}
- *   POST /upload_model  → .tflite → LittleFS → restart
+ *   GET  /model_info    → JSON: {loaded, size_kb, arena_kb, err}
+ *   POST /upload_model  → .tflite → SD card (fallback LittleFS) → restart
  *   GET  /sd/info       → JSON: {mounted, good, bad, used_mb, total_mb}
  *   POST /sd/capture    → ?label=good|bad → simpan JPEG ke SD
  *   GET  /sd/list       → JSON daftar file dataset di SD
@@ -376,15 +376,25 @@ void handleCamReset() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// TFLite: load model dari LittleFS → PSRAM
+// TFLite: load model → PSRAM
+// Model disimpan di SD card (tahan terhadap upload ulang LittleFS
+// yang menimpa seluruh partisi); LittleFS hanya fallback tanpa SD.
 // ─────────────────────────────────────────────────────────────
+#define MODEL_PATH "/egg_model.tflite"
+static fs::FS& modelFS() { return sdMounted ? (fs::FS&)SD_MMC : (fs::FS&)LittleFS; }
+
 bool initTFLite() {
-  if (!LittleFS.exists("/egg_model.tflite")) {
-    Serial.println("[TF] Tidak ada model di LittleFS");
+  File f;
+  if (sdMounted && SD_MMC.exists(MODEL_PATH)) {
+    f = SD_MMC.open(MODEL_PATH, "r");
+    Serial.println("[TF] Model dari SD card");
+  } else if (LittleFS.exists(MODEL_PATH)) {
+    f = LittleFS.open(MODEL_PATH, "r");
+    Serial.println("[TF] Model dari LittleFS");
+  } else {
+    Serial.println("[TF] Tidak ada model (SD/LittleFS)");
     return false;
   }
-
-  File f  = LittleFS.open("/egg_model.tflite", "r");
   size_t sz = f.size();
   modelSizeKB = sz / 1024;
 
@@ -876,11 +886,11 @@ void handlePredict() {
 void handleUploadDone() {
   if (uploadFile) uploadFile.close();
 
-  if (!LittleFS.exists("/egg_model.tflite")) {
+  if (!modelFS().exists(MODEL_PATH)) {
     server.send(500, "application/json", "{\"ok\":false,\"error\":\"save_failed\"}");
     return;
   }
-  File f  = LittleFS.open("/egg_model.tflite", "r");
+  File f  = modelFS().open(MODEL_PATH, "r");
   size_t sz = f.size(); f.close();
 
   char resp[96];
@@ -896,8 +906,9 @@ void handleUploadDone() {
 void handleUploadChunk() {
   HTTPUpload& up = server.upload();
   if (up.status == UPLOAD_FILE_START) {
-    Serial.printf("[UPLOAD] Start: %s\n", up.filename.c_str());
-    uploadFile = LittleFS.open("/egg_model.tflite", "w");
+    Serial.printf("[UPLOAD] Start: %s → %s\n", up.filename.c_str(),
+                  sdMounted ? "SD card" : "LittleFS");
+    uploadFile = modelFS().open(MODEL_PATH, "w");
   } else if (up.status == UPLOAD_FILE_WRITE) {
     if (uploadFile) uploadFile.write(up.buf, up.currentSize);
   } else if (up.status == UPLOAD_FILE_END) {
