@@ -385,79 +385,9 @@ async function loadModelInfo() {
   } catch (_) {}
 }
 
-function onFileSelected(input) {
-  const file = input.files[0];
-  const lbl  = document.getElementById('file-label');
-  const btn  = document.getElementById('upload-btn');
-  if (file) {
-    lbl.textContent = file.name + ' — ' + (file.size / 1024).toFixed(0) + ' KB';
-    lbl.style.color = 'var(--text-1)';
-  } else {
-    lbl.textContent = 'Pilih atau drop file .tflite';
-    lbl.style.color = 'var(--text-2)';
-  }
-  btn.disabled = !file;
-}
-
-async function uploadModel() {
-  const file = document.getElementById('model-file').files[0];
-  if (!file) { showToast('Pilih file .tflite dulu', 'error'); return; }
-
-  const btn      = document.getElementById('upload-btn');
-  const progress = document.getElementById('upload-progress');
-  const fill     = document.getElementById('upload-fill');
-  const status   = document.getElementById('upload-status');
-
-  btn.disabled = true;
-  progress.classList.remove('hidden');
-  fill.style.width   = '0%';
-  status.textContent = 'Mengunggah...';
-
-  try {
-    const fd = new FormData();
-    fd.append('model', file);
-
-    const result = await new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      xhr.upload.onprogress = e => {
-        if (e.lengthComputable) {
-          const pct = Math.round(e.loaded / e.total * 100);
-          fill.style.width   = pct + '%';
-          status.textContent = 'Mengunggah... ' + pct + '%';
-        }
-      };
-      xhr.onload  = () => {
-        try { resolve(JSON.parse(xhr.responseText)); }
-        catch { resolve({ ok: false, error: 'parse_error' }); }
-      };
-      xhr.onerror = () => reject(new Error('Network error'));
-      xhr.open('POST', '/upload_model');
-      xhr.send(fd);
-    });
-
-    if (result.ok) {
-      fill.style.width   = '100%';
-      status.textContent = '✅ Tersimpan (' + result.size_kb + ' KB) — Menunggu restart...';
-      showToast('Model diupload! Menunggu restart...', 'good');
-
-      await waitForRestart();
-      status.textContent = '✅ Model aktif!';
-      showToast('✅ Model baru aktif!', 'good');
-      loadModelInfo();
-      previewOk = false;
-      document.getElementById('overlay-loading').style.display = '';
-    } else {
-      status.textContent = 'Gagal: ' + (result.error || 'unknown');
-      showToast('Upload gagal', 'error');
-      btn.disabled = false;
-    }
-
-  } catch (e) {
-    status.textContent = 'Error: ' + e.message;
-    showToast('Error: ' + e.message, 'error');
-    btn.disabled = false;
-  }
-}
+// Upload model manual dihapus dari UI — pemasangan model satu pintu
+// lewat tab Training (pipeline / tombol "Pasang Model Ini ke Alat").
+// Endpoint POST /upload_model tetap ada dan dipakai installModelToDevice().
 
 async function waitForRestart(maxWait = 15000) {
   const t0 = Date.now();
@@ -1176,30 +1106,6 @@ loadModelInfo();
 updateCounters();
 loadSDInfo();
 setInterval(loadSDInfo, 30000);
-
-// ─── Drag-and-drop on dropzone ───────────────────────────────
-const dz = document.getElementById('dropzone-area');
-if (dz) {
-  dz.addEventListener('dragover', e => {
-    e.preventDefault();
-    dz.classList.add('drag-over');
-  });
-  dz.addEventListener('dragleave', () => dz.classList.remove('drag-over'));
-  dz.addEventListener('drop', e => {
-    e.preventDefault();
-    dz.classList.remove('drag-over');
-    const file = e.dataTransfer.files[0];
-    if (file && file.name.endsWith('.tflite')) {
-      const input = document.getElementById('model-file');
-      const dt = new DataTransfer();
-      dt.items.add(file);
-      input.files = dt.files;
-      onFileSelected(input);
-    } else {
-      showToast('File harus berekstensi .tflite', 'error');
-    }
-  });
-}
 
 // ─── Toast ────────────────────────────────────────────────────
 function showToast(msg, type) {

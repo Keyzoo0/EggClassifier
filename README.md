@@ -174,12 +174,14 @@ http://telur.local       ← via mDNS (Windows perlu Bonjour)
 http://<IP_ADDRESS>      ← IP tampil di Serial Monitor
 ```
 
-### 7. Upload Model
+### 7. Pasang Model
 
-1. Jalankan training di Google Colab → download `egg_model.tflite`
-2. Di web interface → tab **Prediksi** → bagian **Model TFLite**
-3. Pilih file `egg_model.tflite` → klik **Upload & Aktifkan Model**
-4. Board restart otomatis, model tersimpan permanen di flash
+Model dipasang dari tab **🚀 Training** (satu pintu):
+jalankan pipeline penuh, atau klik **"Pasang Model Ini ke Alat"** pada kartu
+Model Terakhir di GitHub. Board restart otomatis dan model tersimpan permanen di flash.
+
+> Untuk model dari luar pipeline (mis. hasil Colab), gunakan endpoint langsung:
+> `curl -F "model=@egg_model.tflite" http://telur.local/upload_model`
 
 ---
 
@@ -292,7 +294,7 @@ lalu otomatis dipasang ke alat. Progres bisa dipantau di tab Actions GitHub.
 ### Cara 2 — Manual via Google Colab
 
 Buka notebook [`training/KlasifikasiTelur_Training.ipynb`](training/KlasifikasiTelur_Training.ipynb) di Google Colab,
-lalu upload model hasilnya lewat tab Prediksi.
+lalu pasang model hasilnya via `curl -F "model=@egg_model.tflite" http://telur.local/upload_model`.
 
 ### Pipeline Training (kedua cara sama)
 

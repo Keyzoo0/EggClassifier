@@ -328,9 +328,8 @@
   <div id="no-model-warning" class="warn-box">
     <p class="text-sm font-semibold mb-1" style="color:var(--warn)">⚠️ Belum ada model</p>
     <p class="text-xs" style="color:#fde68a">
-      Pasang model dari tab Training, atau upload file
-      <code style="background:rgba(245,158,11,0.15);padding:1px 5px;border-radius:4px">egg_model.tflite</code>
-      di bagian Model di bawah.
+      Buka tab <b>🚀 Training</b> lalu jalankan pipeline, atau klik
+      "Pasang Model Ini ke Alat" pada kartu Model Terakhir di GitHub.
     </p>
     <p id="model-err" class="text-xs mt-1.5 hidden"
        style="color:#fca5a5;font-family:monospace"></p>
@@ -379,45 +378,15 @@
     <div id="history-list" class="space-y-2"></div>
   </div>
 
-  <!-- Model management -->
-  <div class="card p-4 space-y-3">
+  <!-- Status model — pemasangan model lewat tab Training -->
+  <div class="card p-4 space-y-2">
     <div class="flex items-center justify-between">
       <h3 class="text-sm font-semibold" style="color:var(--text-1)">Model TFLite</h3>
       <span id="model-status" class="badge-missing">Tidak ada model</span>
     </div>
-
-    <!-- Dropzone -->
-    <label class="block cursor-pointer">
-      <div class="dropzone" id="dropzone-area">
-        <div class="flex flex-col items-center gap-1.5">
-          <span style="font-size:1.75rem">📦</span>
-          <span id="file-label" class="text-xs font-medium" style="color:var(--text-2)">
-            Pilih atau drop file .tflite
-          </span>
-          <span style="font-size:11px;color:var(--text-3)">dari hasil training Google Colab</span>
-        </div>
-      </div>
-      <input type="file" id="model-file" accept=".tflite" class="hidden"
-             onchange="onFileSelected(this)">
-    </label>
-
-    <button id="upload-btn" class="btn-upload" onclick="uploadModel()" disabled>
-      ⬆️ &nbsp;Upload &amp; Aktifkan Model
-    </button>
-
-    <!-- Upload progress -->
-    <div id="upload-progress" class="hidden space-y-1.5">
-      <div class="bar-track">
-        <div id="upload-fill" class="bar-upload" style="width:0%"></div>
-      </div>
-      <p id="upload-status" class="text-xs text-center" style="color:var(--text-2)">
-        Mengunggah...
-      </p>
-    </div>
-
-    <p class="text-xs pt-2 border-t" style="color:var(--text-3);border-color:rgba(255,255,255,0.05)">
-      Setelah upload, board restart otomatis (~3 detik).
-      Model tersimpan permanen di flash meskipun board mati.
+    <p class="text-xs" style="color:var(--text-3)">
+      Model dipasang otomatis dari tab <b>🚀 Training</b> dan tersimpan permanen
+      di flash meskipun alat mati.
     </p>
   </div>
 
