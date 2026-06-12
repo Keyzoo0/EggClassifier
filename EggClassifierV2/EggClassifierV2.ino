@@ -9,8 +9,9 @@
  * Board Settings (Tools):
  *   Board            : ESP32S3 Dev Module
  *   Flash Size       : 16MB (128Mb)   ← varian N16R8 (esptool detect 16MB)
- *   Partition Scheme : Default 16MB with spiffs (6.25MB APP/3.43MB SPIFFS)
- *                      ← dual-OTA: update firmware via web (/ota), tanpa USB
+ *   Partition Scheme : Custom  ← memakai partitions.csv di folder sketch ini
+ *                      (16MB dual-OTA: app 2×6.25MB + LittleFS 3.43MB;
+ *                      menu "Default 16MB" tidak ada utk ESP32S3 di core 3.x)
  *   PSRAM            : OPI PSRAM
  *   CPU Frequency    : 240MHz
  *   USB CDC On Boot  : Enabled
@@ -915,13 +916,25 @@ void handleFSUploadDone() {
 // ─────────────────────────────────────────────────────────────
 // HTTP: OTA firmware via web (/ota) — manfaat partisi dual-OTA 16MB.
 // Arduino IDE: Sketch → Export Compiled Binary → upload .ino.bin.
-// Gagal otomatis bila partition scheme tanpa slot OTA.
 // ─────────────────────────────────────────────────────────────
+// Slot OTA dianggap siap HANYA bila ada partisi app kedua. Penting:
+// huge_app punya subtype ota_0 tunggal → esp_ota_get_next_update_partition
+// "wrap" balik ke partisi yang SEDANG BERJALAN; menulis ke sana = brick.
+static bool otaSlotReady() {
+  const esp_partition_t* next = esp_ota_get_next_update_partition(NULL);
+  return next && next != esp_ota_get_running_partition();
+}
+
 static bool otaOk = false;
 
 void handleOTAChunk() {
   HTTPUpload& up = server.upload();
   if (up.status == UPLOAD_FILE_START) {
+    if (!otaSlotReady()) {
+      otaOk = false;
+      Serial.println("[OTA] Ditolak: tidak ada slot app kedua (partition scheme tanpa OTA)");
+      return;
+    }
     otaOk = Update.begin(UPDATE_SIZE_UNKNOWN);
     Serial.printf("[OTA] Mulai %s → %s\n", up.filename.c_str(),
                   otaOk ? "ok" : Update.errorString());
@@ -942,8 +955,10 @@ void handleOTAChunk() {
 
 void handleOTADone() {
   if (!otaOk) {
-    char resp[160];
-    snprintf(resp, sizeof(resp), "{\"ok\":false,\"error\":\"%s\"}", Update.errorString());
+    char resp[200];
+    snprintf(resp, sizeof(resp), "{\"ok\":false,\"error\":\"%s\"}",
+             otaSlotReady() ? Update.errorString()
+                            : "tidak ada slot OTA — pakai Partition Scheme: Custom (partitions.csv 16MB)");
     server.send(500, "application/json", resp);
     return;
   }
@@ -958,7 +973,7 @@ void handleOTADone() {
 // ─────────────────────────────────────────────────────────────
 void handleSysInfo() {
   const esp_partition_t* run = esp_ota_get_running_partition();
-  bool otaReady = esp_ota_get_next_update_partition(NULL) != NULL;
+  bool otaReady = otaSlotReady();
 
   char resp[512];
   snprintf(resp, sizeof(resp),
@@ -1304,13 +1319,33 @@ void setup() {
   );
   Serial.println("[OK] Inference task → Core 0 (prio 5)");
 
-  // 7. WiFi — event-driven reconnect (tidak perlu polling di loop)
-  WiFi.onEvent([](WiFiEvent_t event) {
-    if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
-      WiFi.reconnect();
+  // 7. WiFi — event-driven:
+  //    GOT_IP     → print IP + umumkan ulang mDNS + sinkron NTP. Router bisa
+  //                 memberi IP baru tiap connect; mDNS di-restart di sini agar
+  //                 telur.local SELALU menunjuk IP terbaru (akses pakai
+  //                 telur.local, jangan hafal IP).
+  //    DISCONNECT → log alasan + reconnect dengan jeda ≥5 dtk. Tanpa jeda,
+  //                 upaya connect bertumpuk → "sta is connecting, return error"
+  //                 dan pemulihan justru lebih lama.
+  WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
+    if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
+      Serial.printf("[WiFi] IP: %s\n", WiFi.localIP().toString().c_str());
+      MDNS.end();
+      if (MDNS.begin("telur")) Serial.println("[WiFi] mDNS: http://telur.local");
+      configTime(7 * 3600, 0, "pool.ntp.org", "time.google.com");  // WIB UTC+7
+    } else if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+      static uint32_t lastTry = 0;
+      Serial.printf("[WiFi] Putus (reason %d)\n",
+                    (int)info.wifi_sta_disconnected.reason);
+      if (millis() - lastTry > 5000) {
+        lastTry = millis();
+        WiFi.reconnect();
+      }
     }
   });
   WiFi.begin(WIFI_SSID, WIFI_PASS);
+  WiFi.setSleep(false);   // modem sleep OFF — default ON bikin respons HTTP
+                          // tersendat (latensi naik-turun, preview "muter")
   Serial.printf("[..] Connecting to '%s'", WIFI_SSID);
   for (int t = 0; t < 60 && WiFi.status() != WL_CONNECTED; t++) {
     vTaskDelay(pdMS_TO_TICKS(250));
@@ -1321,14 +1356,8 @@ void setup() {
     Serial.printf("\n[OK] WiFi: http://%s\n", WiFi.localIP().toString().c_str());
     neopixelWrite(RGB_LED_PIN, 0, 12, 0);
   } else {
-    Serial.println("\n[WARN] WiFi gagal — akan retry otomatis via event");
+    Serial.println("\n[WARN] WiFi gagal — retry otomatis tiap 5 dtk via event");
   }
-
-  // 7b. NTP (WIB, UTC+7) — timestamp asli untuk log prediksi di SD
-  configTime(7 * 3600, 0, "pool.ntp.org", "time.google.com");
-
-  // 8. mDNS
-  if (MDNS.begin("telur")) Serial.println("[OK] mDNS: http://telur.local");
 
   // 9. Routes HTTP
   server.on("/",             HTTP_GET,  handleRoot);
@@ -1360,8 +1389,8 @@ void setup() {
   const esp_partition_t* runPart = esp_ota_get_running_partition();
   Serial.printf("[INFO] Partisi app: %s | OTA via web: %s\n\n",
     runPart ? runPart->label : "?",
-    esp_ota_get_next_update_partition(NULL)
-      ? "siap" : "TIDAK ADA — pakai partition scheme Default 16MB");
+    otaSlotReady()
+      ? "siap" : "TIDAK ADA — pakai Partition Scheme: Custom (partitions.csv)");
   Serial.println("╔══════════════════════════════════════╗");
   Serial.printf( "║  http://telur.local                  ║\n");
   Serial.printf( "║  http://%-30s║\n",

@@ -1133,7 +1133,7 @@ async function loadSysInfo() {
     document.getElementById('sys-detail').innerHTML =
       'Firmware <b>v' + d.fw + '</b> (' + d.built + ') · partisi <b>' + d.part + '</b> · OTA: ' +
       (d.ota ? '<b style="color:var(--success)">siap</b>'
-             : '<b style="color:var(--warn)">tidak tersedia — ganti partition scheme ke Default 16MB</b>') +
+             : '<b style="color:var(--warn)">tidak tersedia — pilih Partition Scheme: Custom lalu flash USB sekali</b>') +
       '<br>Model dari <b>' + d.model_loc + '</b> · tensor arena di <b>' +
       (d.arena_loc === 'sram' ? 'SRAM internal ⚡' : 'PSRAM') + '</b>' +
       '<br>WiFi ' + d.rssi + ' dBm · uptime ' + Math.floor(d.uptime_s / 60) + ' mnt · ' +

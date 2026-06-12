@@ -140,6 +140,7 @@ klasifikasiTelur_ESP32_S3_CAM/
 │   └── dataset/                         # Foto telur lokal (tidak di-track)
 └── EggClassifierV2/                   # ← Firmware utama
     ├── EggClassifierV2.ino
+    ├── partitions.csv                 # Layout flash 16MB dual-OTA (Partition Scheme: Custom)
     └── data/                          # LittleFS — web interface
         ├── index.html
         ├── app.js
@@ -164,10 +165,16 @@ klasifikasiTelur_ESP32_S3_CAM/
 |---|---|
 | Board | `ESP32S3 Dev Module` |
 | Flash Size | `16MB (128Mb)` |
-| **Partition Scheme** | **`Default 16MB with spiffs (6.25MB APP/3.43MB SPIFFS)`** ← wajib, dual-OTA |
+| **Partition Scheme** | **`Custom`** ← wajib; memakai [`EggClassifierV2/partitions.csv`](EggClassifierV2/partitions.csv) (16MB dual-OTA) |
 | PSRAM | `OPI PSRAM` |
 | CPU Frequency | `240MHz` |
 | USB CDC On Boot | `Enabled` |
+
+> ℹ️ Menu "Default 16MB with spiffs" **tidak tersedia** untuk ESP32S3 Dev Module di
+> arduino-esp32 core 3.x — karena itu layout 16MB dual-OTA (app 2×6,25MB +
+> LittleFS 3,43MB) disertakan sebagai `partitions.csv` di folder sketch.
+> Core otomatis memprioritaskan file ini saat compile; pilihan menu **Custom**
+> membuat IDE melaporkan ukuran maksimum app yang benar.
 
 > ⚠️ **Ganti partition scheme = flash via USB sekali** dan seluruh isi flash terhapus
 > (LittleFS + NVS — pengaturan kamera kembali default; **SD card tidak tersentuh**).

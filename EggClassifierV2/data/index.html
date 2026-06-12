@@ -456,7 +456,7 @@
       Firmware diperbarui lewat WiFi — <b>tanpa kabel USB</b>. Di Arduino IDE:
       <b>Sketch → Export Compiled Binary</b>, lalu pilih file
       <code style="color:var(--primary)">EggClassifierV2.ino.bin</code> di sini.
-      Butuh partition scheme <b>Default 16MB</b> (dual-OTA).
+      Butuh partisi dual-OTA (Partition Scheme: <b>Custom</b> + partitions.csv).
     </p>
     <input type="file" id="ota-file" accept=".bin" class="hidden" onchange="otaUpload(this)">
     <button id="ota-btn" class="btn-upload" onclick="document.getElementById('ota-file').click()">
