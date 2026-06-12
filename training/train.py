@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 """
 Phase 3 — Training MobileNetV1 α=0.25 untuk Klasifikasi Telur
-Dataset : training/dataset/  (flat folder, nama file = label_XXXX.jpg)
+Dataset : flat folder, nama file = label_XXXX.jpg (good_/bad_)
 Output  : models/egg_classifier_int8.tflite + models/egg_model.h
 
-Cara pakai:
+Cara pakai lokal (perilaku default tidak berubah):
   cd training/
   source venv/bin/activate
   python train.py
+
+Cara pakai CI (GitHub Actions, dari root repo):
+  python training/train.py --dataset dataset --out training/models \
+    --repeat 8 --epochs1 30 --epochs2 20 --batch 16 --export-dir model
 """
 
-import os, sys, shutil, struct, pathlib
+import os, sys, shutil, struct, pathlib, argparse, json
+from datetime import datetime, timezone
 import numpy as np
 
 # ── Cek dependensi ────────────────────────────────────────────
@@ -24,15 +29,26 @@ except ImportError as e:
 
 print(f"TensorFlow {tf.__version__} | Python {sys.version.split()[0]}\n")
 
-# ── Konfigurasi ───────────────────────────────────────────────
-IMG_SIZE   = 96          # Input model ESP32: 96×96
-BATCH_SIZE = 4           # Kecil karena dataset mini
-EPOCHS_1   = 60          # Fase 1: hanya head
-EPOCHS_2   = 40          # Fase 2: fine-tune top layers
-ALPHA      = 0.25        # MobileNetV1 width multiplier
-DATASET_DIR = pathlib.Path("dataset")
-MODEL_DIR   = pathlib.Path("models")
-MODEL_DIR.mkdir(exist_ok=True)
+# ── Konfigurasi (default = perilaku lama untuk pemakaian lokal) ──
+ap = argparse.ArgumentParser(description="Training klasifikasi telur")
+ap.add_argument("--dataset",    default="dataset", help="folder dataset flat (good_*.jpg / bad_*.jpg)")
+ap.add_argument("--out",        default="models",  help="folder output model")
+ap.add_argument("--batch",      type=int, default=4)
+ap.add_argument("--epochs1",    type=int, default=60, help="fase 1: train head")
+ap.add_argument("--epochs2",    type=int, default=40, help="fase 2: fine-tune")
+ap.add_argument("--repeat",     type=int, default=20, help="augmentasi: repeat dataset per epoch")
+ap.add_argument("--export-dir", default=None,
+                help="jika diisi: salin egg_model.tflite + model_info.json ke folder ini (untuk CI)")
+args = ap.parse_args()
+
+IMG_SIZE   = 96             # Input model ESP32: 96×96
+BATCH_SIZE = args.batch
+EPOCHS_1   = args.epochs1   # Fase 1: hanya head
+EPOCHS_2   = args.epochs2   # Fase 2: fine-tune top layers
+ALPHA      = 0.25           # MobileNetV1 width multiplier
+DATASET_DIR = pathlib.Path(args.dataset)
+MODEL_DIR   = pathlib.Path(args.out)
+MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 # ── 1. Baca dataset dari flat folder ─────────────────────────
 print("=" * 55)
@@ -128,7 +144,7 @@ val_labels_t   = tf.constant(val_labels,   dtype=tf.int32)
 AUTOTUNE = tf.data.AUTOTUNE
 
 # Repeat dataset agar augmentasi menghasilkan lebih banyak sampel
-REPEAT = 20   # Tiap epoch = 20× data asli
+REPEAT = args.repeat   # Tiap epoch = N× data asli
 
 train_ds = (
     tf.data.Dataset.from_tensor_slices((train_files_t, train_labels_t))
@@ -325,6 +341,24 @@ print("=" * 55)
 loss, acc = model.evaluate(val_ds, verbose=0)
 print(f"  Val Loss     : {loss:.4f}")
 print(f"  Val Accuracy : {acc*100:.1f}%")
+
+# ── 10. Export untuk pipeline CI (--export-dir) ───────────────
+if args.export_dir:
+    export_dir = pathlib.Path(args.export_dir)
+    export_dir.mkdir(parents=True, exist_ok=True)
+
+    shutil.copy(path_int8, export_dir / "egg_model.tflite")
+    info = {
+        "val_accuracy": round(float(final_val), 4),
+        "size_kb":      round(len(tflite_q) / 1024, 1),
+        "n_good":       n_good,
+        "n_bad":        n_bad,
+        "alpha":        ALPHA,
+        "img_size":     IMG_SIZE,
+        "trained_at":   datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+    }
+    (export_dir / "model_info.json").write_text(json.dumps(info, indent=2))
+    print(f"\n  [CI] Export: {export_dir}/egg_model.tflite + model_info.json")
 
 print("\n" + "=" * 55)
 print("SELESAI!")

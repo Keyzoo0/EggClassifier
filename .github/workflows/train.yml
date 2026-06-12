@@ -1,0 +1,73 @@
+# Training otomatis — dipicu dari web UI ESP32 (tab Training)
+# lewat workflow_dispatch API, atau manual dari tab Actions di GitHub.
+#
+# Alur: checkout dataset/ → train MobileNetV1 α=0.25 INT8 →
+#       commit model/egg_model.tflite + model/model_info.json kembali ke repo.
+# Web UI kemudian mengunduh model via Contents API dan memasangnya ke ESP32.
+
+name: Train Egg Model
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: train
+  cancel-in-progress: false
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repo (termasuk dataset/)
+        uses: actions/checkout@v4
+
+      - name: Cek dataset
+        run: |
+          n_good=$(ls dataset/good_*.jpg 2>/dev/null | wc -l)
+          n_bad=$(ls dataset/bad_*.jpg 2>/dev/null | wc -l)
+          echo "Dataset: $n_good bagus / $n_bad cacat"
+          if [ "$n_good" -lt 2 ] || [ "$n_bad" -lt 2 ]; then
+            echo "::error::Dataset terlalu sedikit (minimal 2 foto per kelas). Sinkron dataset dulu dari web UI."
+            exit 1
+          fi
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependensi
+        run: pip install "tensorflow-cpu==2.15.*" pillow numpy
+
+      - name: Training
+        run: |
+          python training/train.py \
+            --dataset dataset \
+            --out training/models \
+            --repeat 8 \
+            --epochs1 30 \
+            --epochs2 20 \
+            --batch 16 \
+            --export-dir model
+
+      - name: Commit model ke repo
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f model/egg_model.tflite model/model_info.json
+          git commit -m "model: hasil training otomatis ($(date -u +%Y-%m-%d\ %H:%M) UTC)"
+          # Rebase agar tidak konflik bila ada upload dataset baru selama training
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+      - name: Ringkasan
+        run: |
+          echo "## Hasil Training 🥚" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          cat model/model_info.json >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

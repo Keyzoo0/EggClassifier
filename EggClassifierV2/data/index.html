@@ -35,7 +35,7 @@
       <div>
         <h1 class="text-sm font-bold leading-none tracking-tight">Egg Classifier</h1>
         <p class="text-xs mt-0.5" style="color:var(--text-3);font-size:11px">
-          FireBeetle 2 · ESP32-S3 N16R8
+          Freenove ESP32-S3 · N8R8 + SD
         </p>
       </div>
     </div>
@@ -72,12 +72,21 @@
 <!-- ── Tab bar ──────────────────────────────────────────────── -->
 <div id="tab-bar" class="sticky z-20 px-4 py-3"
      style="top:57px">
-  <div class="tab-pills max-w-xs mx-auto">
+  <div class="tab-pills max-w-md mx-auto">
     <button id="btn-dataset" class="tab-pill active" onclick="switchTab('dataset')">
       📷 &nbsp;Dataset
     </button>
+    <button id="btn-manage" class="tab-pill" onclick="switchTab('manage')">
+      🗂️ &nbsp;Kelola
+    </button>
+    <button id="btn-training" class="tab-pill" onclick="switchTab('training')">
+      🚀 &nbsp;Training
+    </button>
     <button id="btn-predict" class="tab-pill" onclick="switchTab('predict')">
       🔍 &nbsp;Prediksi
+    </button>
+    <button id="btn-camera" class="tab-pill" onclick="switchTab('camera')">
+      🎥 &nbsp;Kamera
     </button>
   </div>
 </div>
@@ -140,15 +149,14 @@
     <p id="progress-info" class="text-xs text-center" style="color:var(--text-3)"></p>
   </div>
 
-  <!-- Download mode info — selalu aktif -->
+  <!-- Storage mode info — teks diubah dinamis oleh app.js sesuai status SD -->
   <div class="card p-3 space-y-1"
        style="border-color:rgba(99,102,241,0.25);background:rgba(99,102,241,0.06)">
-    <p class="text-xs font-semibold" style="color:var(--primary)">📥 Mode Download Aktif</p>
-    <p class="text-xs" style="color:var(--text-2)">
-      Setiap klik tombol → foto langsung diunduh ke PC dengan nama
-      <code style="background:rgba(255,255,255,0.08);padding:1px 5px;border-radius:4px">good_0001.jpg</code> /
-      <code style="background:rgba(255,255,255,0.08);padding:1px 5px;border-radius:4px">bad_0001.jpg</code>
-      dst. Counter tersimpan di browser; pindahkan manual ke folder dataset untuk training.
+    <p id="storage-mode-title" class="text-xs font-semibold" style="color:var(--primary)">
+      📥 Mode Download Aktif
+    </p>
+    <p id="storage-mode-desc" class="text-xs" style="color:var(--text-2)">
+      Mendeteksi SD card...
     </p>
   </div>
 
@@ -165,6 +173,127 @@
   </div>
 
 </div><!-- /tab-dataset -->
+
+<!-- ═══════════════ TAB KELOLA DATASET ═════════════════════ -->
+<div id="tab-manage" class="hidden space-y-4">
+
+  <!-- Toolbar -->
+  <div class="card p-4 space-y-3">
+    <div class="flex items-center justify-between">
+      <h3 class="text-sm font-semibold" style="color:var(--text-1)">Kelola Dataset di SD</h3>
+      <button class="btn-mini" onclick="loadDatasetManager()">↻ Muat Ulang</button>
+    </div>
+
+    <!-- Filter -->
+    <div class="flex gap-1.5">
+      <button id="ds-f-all"  class="btn-mini ds-filter active" onclick="dsSetFilter('all')">Semua</button>
+      <button id="ds-f-good" class="btn-mini ds-filter" onclick="dsSetFilter('good')">✅ Bagus</button>
+      <button id="ds-f-bad"  class="btn-mini ds-filter" onclick="dsSetFilter('bad')">❌ Cacat</button>
+      <span id="ds-count" class="text-xs ml-auto self-center" style="color:var(--text-3)"></span>
+    </div>
+
+    <!-- Upload dari PC -->
+    <div class="grid grid-cols-2 gap-2">
+      <button class="btn-upload" style="background:linear-gradient(135deg,#166534,#15803d)"
+              onclick="dsPickUpload('good')">⬆️ Upload BAGUS</button>
+      <button class="btn-upload" style="background:linear-gradient(135deg,#991b1b,#b91c1c)"
+              onclick="dsPickUpload('bad')">⬆️ Upload CACAT</button>
+    </div>
+    <input type="file" id="ds-upload-input" accept=".jpg,.jpeg" multiple class="hidden"
+           onchange="dsUploadFiles(this)">
+    <p id="ds-upload-status" class="text-xs text-center hidden" style="color:var(--text-2)"></p>
+
+    <p class="text-xs" style="color:var(--text-3)">
+      📵 Preview kamera dimatikan di tab ini agar foto cepat dimuat.
+      Ketuk foto untuk lihat ukuran penuh · 🔁 pindah label · 🗑️ hapus.
+    </p>
+  </div>
+
+  <!-- Galeri -->
+  <div id="ds-grid" class="grid grid-cols-3 gap-2"></div>
+  <p id="ds-empty" class="text-xs text-center py-8" style="color:var(--text-3)">Memuat…</p>
+  <button id="ds-more" class="btn-upload hidden" onclick="dsRenderMore()">
+    Muat lebih banyak ▾
+  </button>
+
+</div><!-- /tab-manage -->
+
+<!-- ═══════════════ TAB TRAINING ═══════════════════════════ -->
+<div id="tab-training" class="hidden space-y-4">
+
+  <!-- Pipeline: satu tombol, full otomatis -->
+  <div class="card p-4 space-y-3">
+    <h3 class="text-sm font-semibold" style="color:var(--text-1)">Training Otomatis — GitHub Actions</h3>
+    <p class="text-xs" style="color:var(--text-2)">
+      Satu klik: foto di SD card disinkron ke GitHub → server training jalan →
+      model baru otomatis terpasang ke alat. Butuh koneksi internet di browser ini.
+    </p>
+
+    <button id="train-btn" class="btn-classify" style="font-size:1rem;padding:16px 20px"
+            onclick="runFullPipeline()">
+      🚀 &nbsp;Sinkron + Training + Pasang Model
+    </button>
+
+    <!-- Step indicator -->
+    <div id="train-steps" class="hidden space-y-1.5">
+      <div class="step-row" id="step-sync">
+        <span class="step-icon">1</span>
+        <span class="step-text">Sinkron dataset ke GitHub</span>
+        <span class="step-state" style="color:var(--text-3)">—</span>
+      </div>
+      <div class="step-row" id="step-train">
+        <span class="step-icon">2</span>
+        <span class="step-text">Training di GitHub Actions</span>
+        <span class="step-state" style="color:var(--text-3)">—</span>
+      </div>
+      <div class="step-row" id="step-deploy">
+        <span class="step-icon">3</span>
+        <span class="step-text">Pasang model ke alat</span>
+        <span class="step-state" style="color:var(--text-3)">—</span>
+      </div>
+    </div>
+
+    <div id="train-progress" class="hidden space-y-1.5">
+      <div class="bar-track">
+        <div id="train-fill" class="bar-upload" style="width:0%"></div>
+      </div>
+      <p id="train-status" class="text-xs text-center" style="color:var(--text-2)"></p>
+    </div>
+
+    <div class="flex items-center justify-between pt-2 border-t"
+         style="border-color:rgba(255,255,255,0.05)">
+      <span class="text-xs" style="color:var(--text-3)">
+        📦 Keyzoo0/EggClassifier · main
+      </span>
+      <button class="btn-mini" onclick="changeToken()">🔑 Ganti Token</button>
+    </div>
+  </div>
+
+  <!-- Model terakhir hasil training -->
+  <div class="card p-4 space-y-2">
+    <div class="flex items-center justify-between">
+      <h3 class="text-sm font-semibold" style="color:var(--text-1)">Model Terakhir di GitHub</h3>
+      <button class="btn-mini" onclick="loadRemoteModelInfo()">↻ Cek</button>
+    </div>
+    <p id="remote-model-info" class="text-xs" style="color:var(--text-3)">
+      Klik "Cek" untuk melihat hasil training terakhir.
+    </p>
+    <button id="deploy-btn" class="btn-upload hidden" onclick="deployRemoteModel()">
+      ⬇️ &nbsp;Pasang Model Ini ke Alat
+    </button>
+  </div>
+
+  <!-- Catatan token -->
+  <div class="card p-3">
+    <p class="text-xs" style="color:var(--text-3)">
+      Saat pertama kali dipakai, browser akan meminta GitHub token sekali
+      (Settings → Developer settings → Fine-grained tokens → permission
+      <b>Contents</b> + <b>Actions</b> Read &amp; Write). Token hanya tersimpan
+      di browser ini — tidak di ESP32 maupun di kode.
+    </p>
+  </div>
+
+</div><!-- /tab-training -->
 
 <!-- ═══════════════ TAB PREDICT ════════════════════════════ -->
 <div id="tab-predict" class="hidden space-y-4">
@@ -271,6 +400,39 @@
   </div>
 
 </div><!-- /tab-predict -->
+
+<!-- ═══════════════ TAB CAMERA ═════════════════════════════ -->
+<div id="tab-camera" class="hidden space-y-4">
+
+  <!-- Info -->
+  <div class="card p-3 space-y-1"
+       style="border-color:rgba(99,102,241,0.25);background:rgba(99,102,241,0.06)">
+    <p class="text-xs font-semibold" style="color:var(--primary)">🎥 Pengaturan Sensor OV2640</p>
+    <p class="text-xs" style="color:var(--text-2)">
+      Perubahan langsung terlihat di preview atas dan <b>tersimpan permanen</b> di alat.
+      Untuk akurasi maksimal: atur pencahayaan, matikan <b>Auto Exposure</b> dan
+      <b>Auto White Balance</b>, lalu pakai setting yang sama saat mengumpulkan
+      dataset <i>dan</i> prediksi.
+    </p>
+  </div>
+
+  <!-- Kontrol — digenerate oleh app.js dari CAM_SCHEMA -->
+  <div id="cam-settings" class="space-y-4">
+    <p class="text-xs text-center py-6" style="color:var(--text-3)">Memuat pengaturan…</p>
+  </div>
+
+  <!-- Aksi -->
+  <div class="card p-4 flex gap-2">
+    <button class="btn-upload" style="flex:1" onclick="loadCamSettings()">
+      ↻ &nbsp;Muat Ulang
+    </button>
+    <button class="btn-upload" style="flex:1;background:linear-gradient(135deg,#991b1b,#b91c1c)"
+            onclick="resetCamSettings()">
+      ⚠️ &nbsp;Reset Default
+    </button>
+  </div>
+
+</div><!-- /tab-camera -->
 
 </main>
 

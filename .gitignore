@@ -42,3 +42,15 @@ Thumbs.db
 
 # Claude Code internal
 .embedder/
+
+# ── Pipeline training GitHub Actions ──────────────────────────
+# dataset/ di ROOT repo DI-track (di-upload web UI via Contents API);
+# training/dataset/ tetap di-ignore oleh aturan `dataset/` di atas.
+!/dataset/
+!/dataset/**
+# model hasil training CI di-track (override aturan *.tflite di atas)
+!/model/
+!/model/**
+
+# Artefak training lokal (model hasil CI ada di /model/)
+training/models/

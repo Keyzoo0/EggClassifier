@@ -1,22 +1,25 @@
 /*
  * EggClassifier V2 — Firmware Terpadu (RTOS + PSRAM Optimized)
- * Board  : DFRobot FireBeetle 2 ESP32-S3 N16R8 v1.0
+ * Board  : Freenove ESP32-S3-WROOM CAM (FNK0085, N8R8) + microSD
  *
  * Library (Tools → Manage Libraries):
- *   1. DFRobot_AXP313A
- *   2. TensorFlowLite_ESP32 (by tanakamasayuki)
+ *   1. TensorFlowLite_ESP32 (by tanakamasayuki)
+ *   (AXP313A tidak diperlukan — kamera Freenove selalu berdaya)
  *
  * Board Settings (Tools):
  *   Board            : ESP32S3 Dev Module
- *   Flash Size       : 16MB (128Mb)
- *   Partition Scheme : Huge APP (3MB No OTA/1MB SPIFFS)  ← WAJIB
+ *   Flash Size       : 8MB (64Mb)                        ← Freenove = 8MB!
+ *   Partition Scheme : 8M with spiffs (3MB APP/1.5MB SPIFFS)
  *   PSRAM            : OPI PSRAM
  *   CPU Frequency    : 240MHz
  *   USB CDC On Boot  : Enabled
  *
+ * SD card: microSD 4GB, format FAT32 (allocation unit 16K),
+ *   SDMMC 1-bit — CMD=38, CLK=39, D0=40. Dataset di /dataset/.
+ *
  * Arsitektur dual-core:
  *   Core 0 (prio 5) — inferenceTask: TFLite Invoke
- *   Core 1 (prio 1) — loop(): WebServer.handleClient + LED
+ *   Core 1 (prio 1) — loop(): WebServer.handleClient + LED + SD I/O
  *
  * PSRAM layout (~1.4 MB dari 8 MB tersedia):
  *   rgbArena    640×480×3 = 921 KB  — decode JPEG→RGB888 (pre-alokasi)
@@ -29,14 +32,24 @@
  *   GET  /predict       → inference → JSON hasil
  *   GET  /model_info    → JSON: {loaded, size_kb, arena_kb}
  *   POST /upload_model  → .tflite → LittleFS → restart
+ *   GET  /sd/info       → JSON: {mounted, good, bad, used_mb, total_mb}
+ *   POST /sd/capture    → ?label=good|bad → simpan JPEG ke SD
+ *   GET  /sd/list       → JSON daftar file dataset di SD
+ *   GET  /sd/file       → ?name=good_0001.jpg → stream JPEG dari SD
+ *   POST /sd/delete     → ?name=good_0001.jpg → hapus file
+ *   POST /sd/relabel    → ?name=good_0001.jpg → rename ke label lawan
+ *   POST /sd/upload     → ?label=good|bad + multipart JPEG dari PC
+ *   GET  /camera/get    → JSON semua parameter sensor OV2640
+ *   POST /camera/set    → ?var=brightness&val=1 → set + simpan ke NVS
+ *   POST /camera/reset  → hapus setting custom → restart (default pabrik)
  */
 
-#include <Wire.h>
 #include <WiFi.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
 #include <LittleFS.h>
-#include "DFRobot_AXP313A.h"
+#include <SD_MMC.h>
+#include <Preferences.h>
 #include "esp_camera.h"
 #include "img_converters.h"
 #include "TensorFlowLite_ESP32.h"
@@ -52,27 +65,33 @@
 #define WIFI_SSID  "ROSI1"
 #define WIFI_PASS  "20517420"
 
-// ── Pin Camera ────────────────────────────────────────────────
+// ── Pin Camera — Freenove FNK0085 (profil ESP32S3_EYE) ───────
 #define CAM_PWDN   -1
 #define CAM_RESET  -1
-#define CAM_XCLK   45
-#define CAM_SIOD    1
-#define CAM_SIOC    2
-#define CAM_D7     48
-#define CAM_D6     46
-#define CAM_D5      8
-#define CAM_D4      7
-#define CAM_D3      4
-#define CAM_D2     41
-#define CAM_D1     40
-#define CAM_D0     39
+#define CAM_XCLK   15
+#define CAM_SIOD    4
+#define CAM_SIOC    5
+#define CAM_D7     16   // Y9
+#define CAM_D6     17   // Y8
+#define CAM_D5     18   // Y7
+#define CAM_D4     12   // Y6
+#define CAM_D3     10   // Y5
+#define CAM_D2      8   // Y4
+#define CAM_D1      9   // Y3
+#define CAM_D0     11   // Y2
 #define CAM_VSYNC   6
-#define CAM_HREF   42
-#define CAM_PCLK    5
+#define CAM_HREF    7
+#define CAM_PCLK   13
 
 // ── Pin Board ─────────────────────────────────────────────────
-#define LED_PIN   21   // solid=WiFi OK, blink=reconnecting
-#define BOOT_BTN   0
+#define RGB_LED_PIN 48  // WS2812 onboard: biru kedip=WiFi connecting, hijau=OK
+#define BOOT_BTN     0
+
+// ── Pin SD card (SDMMC 1-bit, fixed di PCB Freenove) ─────────
+#define SD_PIN_CMD  38
+#define SD_PIN_CLK  39
+#define SD_PIN_D0   40
+#define SD_DATASET_DIR "/dataset"
 
 // ── TFLite ────────────────────────────────────────────────────
 #define ARENA_SIZE (200 * 1024)   // 200 KB dari PSRAM
@@ -85,8 +104,12 @@
 #define CROP_SZ     96
 
 // ── Global ────────────────────────────────────────────────────
-DFRobot_AXP313A axp;
-WebServer        server(80);
+WebServer server(80);
+
+// SD card state
+bool     sdMounted = false;
+uint32_t sdCntGood = 0;   // index file terakhir per label
+uint32_t sdCntBad  = 0;
 
 // TFLite
 static uint8_t*                           tensorArena = nullptr;
@@ -119,16 +142,29 @@ static InferResult       inferResult;
 File uploadFile;
 
 // ─────────────────────────────────────────────────────────────
-// LED WiFi indicator (non-blocking)
+// LED status — WS2812 onboard GPIO48 (non-blocking)
+//   Biru kedip = WiFi connecting/reconnect, hijau redup = WiFi OK
+//   Hijau/merah terang sesaat = hasil klasifikasi
 // ─────────────────────────────────────────────────────────────
+static volatile uint32_t ledHoldUntil = 0;
+
+void ledShow(uint8_t r, uint8_t g, uint8_t b, uint32_t holdMs) {
+  ledHoldUntil = millis() + holdMs;
+  neopixelWrite(RGB_LED_PIN, r, g, b);
+}
+
 void updateLED() {
   static uint32_t lastBlink = 0;
+  static bool     blinkOn   = false;
+  if (millis() < ledHoldUntil) return;   // sedang menampilkan hasil
+
   if (WiFi.status() == WL_CONNECTED) {
-    digitalWrite(LED_PIN, HIGH);
+    neopixelWrite(RGB_LED_PIN, 0, 12, 0);          // hijau redup
   } else {
     if (millis() - lastBlink >= 250) {
       lastBlink = millis();
-      digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+      blinkOn   = !blinkOn;
+      neopixelWrite(RGB_LED_PIN, 0, 0, blinkOn ? 32 : 0);  // biru kedip
     }
   }
 }
@@ -171,6 +207,131 @@ bool initCamera() {
   }
   Serial.println("[OK] Camera: VGA 640×480 JPEG double-buffer PSRAM");
   return true;
+}
+
+// ─────────────────────────────────────────────────────────────
+// Camera settings — set parameter sensor + persist di NVS
+// Setting tersimpan permanen agar exposure/WB konsisten antara
+// sesi pengambilan dataset dan prediksi.
+// ─────────────────────────────────────────────────────────────
+Preferences camPrefs;
+
+static const char* const CAM_VARS[] = {
+  "quality", "brightness", "contrast", "saturation", "special_effect",
+  "wb_mode", "awb", "awb_gain", "aec", "aec2", "ae_level", "aec_value",
+  "agc", "agc_gain", "gainceiling", "bpc", "wpc", "raw_gma", "lenc",
+  "hmirror", "vflip", "dcw", "colorbar",
+};
+static const size_t CAM_VARS_N = sizeof(CAM_VARS) / sizeof(CAM_VARS[0]);
+
+bool applyCameraSetting(sensor_t* s, const String& var, int val) {
+  if (var == "quality")        return s->set_quality(s, val)        == 0;
+  if (var == "brightness")     return s->set_brightness(s, val)     == 0;
+  if (var == "contrast")       return s->set_contrast(s, val)       == 0;
+  if (var == "saturation")     return s->set_saturation(s, val)     == 0;
+  if (var == "special_effect") return s->set_special_effect(s, val) == 0;
+  if (var == "wb_mode")        return s->set_wb_mode(s, val)        == 0;
+  if (var == "awb")            return s->set_whitebal(s, val)       == 0;
+  if (var == "awb_gain")       return s->set_awb_gain(s, val)       == 0;
+  if (var == "aec")            return s->set_exposure_ctrl(s, val)  == 0;
+  if (var == "aec2")           return s->set_aec2(s, val)           == 0;
+  if (var == "ae_level")       return s->set_ae_level(s, val)       == 0;
+  if (var == "aec_value")      return s->set_aec_value(s, val)      == 0;
+  if (var == "agc")            return s->set_gain_ctrl(s, val)      == 0;
+  if (var == "agc_gain")       return s->set_agc_gain(s, val)       == 0;
+  if (var == "gainceiling")    return s->set_gainceiling(s, (gainceiling_t)val) == 0;
+  if (var == "bpc")            return s->set_bpc(s, val)            == 0;
+  if (var == "wpc")            return s->set_wpc(s, val)            == 0;
+  if (var == "raw_gma")        return s->set_raw_gma(s, val)        == 0;
+  if (var == "lenc")           return s->set_lenc(s, val)           == 0;
+  if (var == "hmirror")        return s->set_hmirror(s, val)        == 0;
+  if (var == "vflip")          return s->set_vflip(s, val)          == 0;
+  if (var == "dcw")            return s->set_dcw(s, val)            == 0;
+  if (var == "colorbar")       return s->set_colorbar(s, val)       == 0;
+  return false;
+}
+
+// Terapkan setting tersimpan di NVS — dipanggil sekali setelah initCamera
+void loadCameraSettings() {
+  sensor_t* s = esp_camera_sensor_get();
+  if (!s) return;
+  camPrefs.begin("camcfg", true);
+  int applied = 0;
+  for (size_t i = 0; i < CAM_VARS_N; i++) {
+    if (camPrefs.isKey(CAM_VARS[i])) {
+      if (applyCameraSetting(s, CAM_VARS[i], camPrefs.getInt(CAM_VARS[i]))) applied++;
+    }
+  }
+  camPrefs.end();
+  if (applied) Serial.printf("[OK] Camera: %d setting custom dari NVS\n", applied);
+}
+
+// ─────────────────────────────────────────────────────────────
+// HTTP: baca semua parameter kamera (dari register sensor)
+// ─────────────────────────────────────────────────────────────
+void handleCamGet() {
+  sensor_t* s = esp_camera_sensor_get();
+  if (!s) { server.send(503, "application/json", "{\"error\":\"no_camera\"}"); return; }
+
+  char resp[640];
+  snprintf(resp, sizeof(resp),
+    "{\"quality\":%d,\"brightness\":%d,\"contrast\":%d,\"saturation\":%d,"
+    "\"special_effect\":%d,\"wb_mode\":%d,\"awb\":%d,\"awb_gain\":%d,"
+    "\"aec\":%d,\"aec2\":%d,\"ae_level\":%d,\"aec_value\":%d,"
+    "\"agc\":%d,\"agc_gain\":%d,\"gainceiling\":%d,"
+    "\"bpc\":%d,\"wpc\":%d,\"raw_gma\":%d,\"lenc\":%d,"
+    "\"hmirror\":%d,\"vflip\":%d,\"dcw\":%d,\"colorbar\":%d}",
+    s->status.quality, s->status.brightness, s->status.contrast,
+    s->status.saturation, s->status.special_effect, s->status.wb_mode,
+    s->status.awb, s->status.awb_gain, s->status.aec, s->status.aec2,
+    s->status.ae_level, s->status.aec_value, s->status.agc,
+    s->status.agc_gain, s->status.gainceiling, s->status.bpc,
+    s->status.wpc, s->status.raw_gma, s->status.lenc,
+    s->status.hmirror, s->status.vflip, s->status.dcw, s->status.colorbar);
+  server.send(200, "application/json", resp);
+}
+
+// ─────────────────────────────────────────────────────────────
+// HTTP: set satu parameter (/camera/set?var=brightness&val=1)
+// ─────────────────────────────────────────────────────────────
+void handleCamSet() {
+  sensor_t* s = esp_camera_sensor_get();
+  if (!s) { server.send(503, "application/json", "{\"error\":\"no_camera\"}"); return; }
+
+  String var = server.arg("var");
+  if (!server.hasArg("var") || !server.hasArg("val")) {
+    server.send(400, "application/json", "{\"error\":\"missing_args\"}"); return;
+  }
+  int val = server.arg("val").toInt();
+
+  if (!applyCameraSetting(s, var, val)) {
+    server.send(400, "application/json", "{\"error\":\"bad_var_or_val\"}"); return;
+  }
+
+  // Persist ke NVS — kecuali colorbar (pola tes, tidak perlu permanen)
+  if (var != "colorbar") {
+    camPrefs.begin("camcfg", false);
+    camPrefs.putInt(var.c_str(), val);
+    camPrefs.end();
+  }
+
+  char resp[80];
+  snprintf(resp, sizeof(resp), "{\"ok\":true,\"var\":\"%s\",\"val\":%d}",
+           var.c_str(), val);
+  server.send(200, "application/json", resp);
+}
+
+// ─────────────────────────────────────────────────────────────
+// HTTP: reset semua setting kamera → default pabrik (restart)
+// ─────────────────────────────────────────────────────────────
+void handleCamReset() {
+  camPrefs.begin("camcfg", false);
+  camPrefs.clear();
+  camPrefs.end();
+  server.send(200, "application/json", "{\"ok\":true,\"restarting\":true}");
+  vTaskDelay(pdMS_TO_TICKS(500));
+  Serial.println("[INFO] Camera setting direset, restart...");
+  ESP.restart();
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -222,6 +383,251 @@ bool initTFLite() {
     inTensor->dims->data[0], inTensor->dims->data[1],
     inTensor->dims->data[2], inTensor->dims->data[3]);
   return true;
+}
+
+// ─────────────────────────────────────────────────────────────
+// SD card — mount SDMMC 1-bit + scan counter dataset
+// ─────────────────────────────────────────────────────────────
+bool initSD() {
+  SD_MMC.setPins(SD_PIN_CLK, SD_PIN_CMD, SD_PIN_D0);
+  if (!SD_MMC.begin("/sdcard", true)) {   // true = mode 1-bit
+    Serial.println("[WARN] SD card tidak terdeteksi — dataset mode download");
+    return false;
+  }
+  if (!SD_MMC.exists(SD_DATASET_DIR)) SD_MMC.mkdir(SD_DATASET_DIR);
+
+  // Scan index terakhir tiap label (format: good_0001.jpg / bad_0001.jpg)
+  File dir = SD_MMC.open(SD_DATASET_DIR);
+  File f;
+  while ((f = dir.openNextFile())) {
+    const char* base = strrchr(f.name(), '/');
+    base = base ? base + 1 : f.name();
+    unsigned long n = 0;
+    if      (sscanf(base, "good_%lu", &n) == 1) { if (n > sdCntGood) sdCntGood = n; }
+    else if (sscanf(base, "bad_%lu",  &n) == 1) { if (n > sdCntBad)  sdCntBad  = n; }
+    f.close();
+  }
+  dir.close();
+
+  Serial.printf("[OK] SD: %llu MB (good=%lu, bad=%lu)\n",
+    SD_MMC.totalBytes() / (1024ULL * 1024ULL),
+    (unsigned long)sdCntGood, (unsigned long)sdCntBad);
+  return true;
+}
+
+// Tolak nama file dengan path traversal
+static bool sdNameValid(const String& name) {
+  return name.length() > 0 && name.indexOf('/') < 0 && name.indexOf("..") < 0;
+}
+
+// ─────────────────────────────────────────────────────────────
+// HTTP: SD info — dipolling web UI untuk counter dataset
+// ─────────────────────────────────────────────────────────────
+void handleSDInfo() {
+  char resp[160];
+  snprintf(resp, sizeof(resp),
+    "{\"mounted\":%s,\"good\":%lu,\"bad\":%lu,\"used_mb\":%lu,\"total_mb\":%lu}",
+    sdMounted ? "true" : "false",
+    (unsigned long)sdCntGood, (unsigned long)sdCntBad,
+    sdMounted ? (unsigned long)(SD_MMC.usedBytes()  / (1024UL * 1024UL)) : 0,
+    sdMounted ? (unsigned long)(SD_MMC.totalBytes() / (1024UL * 1024UL)) : 0);
+  server.send(200, "application/json", resp);
+}
+
+// ─────────────────────────────────────────────────────────────
+// HTTP: capture → simpan langsung ke SD (/sd/capture?label=good)
+// ─────────────────────────────────────────────────────────────
+void handleSDCapture() {
+  if (!sdMounted)  { server.send(503, "application/json", "{\"error\":\"no_sd\"}"); return; }
+  if (classifying) { server.send(503, "application/json", "{\"error\":\"busy\"}");  return; }
+
+  String label = server.arg("label");
+  if (label != "good" && label != "bad") {
+    server.send(400, "application/json", "{\"error\":\"bad_label\"}"); return;
+  }
+
+  camera_fb_t* fb = esp_camera_fb_get();
+  if (!fb) { server.send(503, "application/json", "{\"error\":\"camera_failed\"}"); return; }
+
+  uint32_t n = (label == "good") ? sdCntGood + 1 : sdCntBad + 1;
+  char path[48];
+  snprintf(path, sizeof(path), SD_DATASET_DIR "/%s_%04lu.jpg",
+           label.c_str(), (unsigned long)n);
+
+  File f = SD_MMC.open(path, FILE_WRITE);
+  if (!f) {
+    esp_camera_fb_return(fb);
+    server.send(500, "application/json", "{\"error\":\"sd_write_failed\"}");
+    return;
+  }
+  size_t written = f.write(fb->buf, fb->len);
+  f.close();
+  esp_camera_fb_return(fb);
+
+  if (written == 0) {
+    SD_MMC.remove(path);
+    server.send(500, "application/json", "{\"error\":\"sd_write_failed\"}");
+    return;
+  }
+
+  if (label == "good") sdCntGood = n; else sdCntBad = n;
+
+  char resp[160];
+  snprintf(resp, sizeof(resp),
+    "{\"ok\":true,\"file\":\"%s_%04lu.jpg\",\"good\":%lu,\"bad\":%lu,\"size_kb\":%lu}",
+    label.c_str(), (unsigned long)n,
+    (unsigned long)sdCntGood, (unsigned long)sdCntBad,
+    (unsigned long)(written / 1024));
+  server.send(200, "application/json", resp);
+}
+
+// ─────────────────────────────────────────────────────────────
+// HTTP: daftar file dataset di SD (JSON, dikirim chunked)
+// ─────────────────────────────────────────────────────────────
+void handleSDList() {
+  if (!sdMounted) { server.send(503, "application/json", "{\"error\":\"no_sd\"}"); return; }
+
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "application/json", "");
+  server.sendContent("[");
+
+  File dir = SD_MMC.open(SD_DATASET_DIR);
+  File f;
+  bool first = true;
+  char item[96];
+  while ((f = dir.openNextFile())) {
+    if (!f.isDirectory()) {
+      const char* base = strrchr(f.name(), '/');
+      base = base ? base + 1 : f.name();
+      snprintf(item, sizeof(item), "%s{\"n\":\"%s\",\"s\":%lu}",
+               first ? "" : ",", base, (unsigned long)f.size());
+      server.sendContent(item);
+      first = false;
+    }
+    f.close();
+  }
+  dir.close();
+  server.sendContent("]");
+  server.sendContent("");   // akhiri chunked response
+}
+
+// ─────────────────────────────────────────────────────────────
+// HTTP: stream satu file dataset dari SD (/sd/file?name=...)
+// ─────────────────────────────────────────────────────────────
+void handleSDFile() {
+  if (!sdMounted) { server.send(503, "text/plain", "no sd"); return; }
+  String name = server.arg("name");
+  if (!sdNameValid(name)) { server.send(400, "text/plain", "bad name"); return; }
+
+  String path = String(SD_DATASET_DIR) + "/" + name;
+  if (!SD_MMC.exists(path)) { server.send(404, "text/plain", "not found"); return; }
+
+  File f = SD_MMC.open(path, FILE_READ);
+  server.streamFile(f, "image/jpeg");
+  f.close();
+}
+
+// ─────────────────────────────────────────────────────────────
+// HTTP: hapus satu file dataset (/sd/delete?name=...)
+// ─────────────────────────────────────────────────────────────
+void handleSDDelete() {
+  if (!sdMounted) { server.send(503, "application/json", "{\"error\":\"no_sd\"}"); return; }
+  String name = server.arg("name");
+  if (!sdNameValid(name)) { server.send(400, "application/json", "{\"error\":\"bad_name\"}"); return; }
+
+  String path = String(SD_DATASET_DIR) + "/" + name;
+  if (!SD_MMC.exists(path)) { server.send(404, "application/json", "{\"error\":\"not_found\"}"); return; }
+
+  bool ok = SD_MMC.remove(path);
+  server.send(ok ? 200 : 500, "application/json",
+              ok ? "{\"ok\":true}" : "{\"error\":\"delete_failed\"}");
+}
+
+// ─────────────────────────────────────────────────────────────
+// HTTP: pindah label (/sd/relabel?name=good_0001.jpg)
+// Rename ke index berikutnya pada label lawan: good ↔ bad
+// ─────────────────────────────────────────────────────────────
+void handleSDRelabel() {
+  if (!sdMounted) { server.send(503, "application/json", "{\"error\":\"no_sd\"}"); return; }
+  String name = server.arg("name");
+  if (!sdNameValid(name)) { server.send(400, "application/json", "{\"error\":\"bad_name\"}"); return; }
+
+  bool fromGood = name.startsWith("good_");
+  if (!fromGood && !name.startsWith("bad_")) {
+    server.send(400, "application/json", "{\"error\":\"bad_label\"}"); return;
+  }
+
+  String from = String(SD_DATASET_DIR) + "/" + name;
+  if (!SD_MMC.exists(from)) { server.send(404, "application/json", "{\"error\":\"not_found\"}"); return; }
+
+  uint32_t n = fromGood ? sdCntBad + 1 : sdCntGood + 1;
+  char newName[32];
+  snprintf(newName, sizeof(newName), "%s_%04lu.jpg",
+           fromGood ? "bad" : "good", (unsigned long)n);
+
+  if (!SD_MMC.rename(from, String(SD_DATASET_DIR) + "/" + newName)) {
+    server.send(500, "application/json", "{\"error\":\"rename_failed\"}"); return;
+  }
+  if (fromGood) sdCntBad = n; else sdCntGood = n;
+
+  char resp[128];
+  snprintf(resp, sizeof(resp),
+    "{\"ok\":true,\"file\":\"%s\",\"good\":%lu,\"bad\":%lu}",
+    newName, (unsigned long)sdCntGood, (unsigned long)sdCntBad);
+  server.send(200, "application/json", resp);
+}
+
+// ─────────────────────────────────────────────────────────────
+// HTTP: upload JPEG dari PC ke dataset (/sd/upload?label=good)
+// Nama file ditentukan alat (index berikutnya) agar tidak bentrok
+// ─────────────────────────────────────────────────────────────
+static File     sdUpFile;
+static String   sdUpName;
+static uint32_t sdUpIdx   = 0;
+static bool     sdUpIsGood = false;
+static bool     sdUpError  = false;
+
+void handleSDUploadChunk() {
+  HTTPUpload& up = server.upload();
+  if (up.status == UPLOAD_FILE_START) {
+    sdUpError = false;
+    sdUpName  = "";
+    String label = server.arg("label");
+    if (!sdMounted || (label != "good" && label != "bad")) { sdUpError = true; return; }
+
+    sdUpIsGood = (label == "good");
+    sdUpIdx    = (sdUpIsGood ? sdCntGood : sdCntBad) + 1;
+    char path[48];
+    snprintf(path, sizeof(path), SD_DATASET_DIR "/%s_%04lu.jpg",
+             label.c_str(), (unsigned long)sdUpIdx);
+    sdUpFile = SD_MMC.open(path, FILE_WRITE);
+    if (!sdUpFile) { sdUpError = true; return; }
+    sdUpName = String(label) + "_";
+    char num[12]; snprintf(num, sizeof(num), "%04lu.jpg", (unsigned long)sdUpIdx);
+    sdUpName += num;
+  } else if (up.status == UPLOAD_FILE_WRITE) {
+    if (sdUpFile && !sdUpError) sdUpFile.write(up.buf, up.currentSize);
+  } else if (up.status == UPLOAD_FILE_END) {
+    if (sdUpFile) sdUpFile.close();
+    if (!sdUpError && up.totalSize > 0) {
+      if (sdUpIsGood) sdCntGood = sdUpIdx; else sdCntBad = sdUpIdx;
+    }
+  } else if (up.status == UPLOAD_FILE_ABORTED) {
+    if (sdUpFile) sdUpFile.close();
+    sdUpError = true;
+  }
+}
+
+void handleSDUploadDone() {
+  if (sdUpError || sdUpName.length() == 0) {
+    server.send(500, "application/json", "{\"error\":\"upload_failed\"}");
+    return;
+  }
+  char resp[128];
+  snprintf(resp, sizeof(resp),
+    "{\"ok\":true,\"file\":\"%s\",\"good\":%lu,\"bad\":%lu}",
+    sdUpName.c_str(), (unsigned long)sdCntGood, (unsigned long)sdCntBad);
+  server.send(200, "application/json", resp);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -335,6 +741,10 @@ static void _runInference() {
   Serial.printf("[Core0] %s  score=%.3f  %lu ms\n",
     r.good ? "BAGUS" : "TIDAK BAGUS", r.score, (unsigned long)r.time_ms);
 
+  // LED hasil: hijau terang = BAGUS, merah = TIDAK BAGUS (1.5 detik)
+  if (r.good) ledShow(0, 64, 0, 1500);
+  else        ledShow(64, 0, 0, 1500);
+
   inferResult = r;
 }
 
@@ -427,8 +837,8 @@ void setup() {
   Serial.begin(115200);
   vTaskDelay(pdMS_TO_TICKS(1000));
   Serial.println("\n╔══════════════════════════════════════╗");
-  Serial.println("║    EggClassifier V2 — FireBeetle 2   ║");
-  Serial.println("║    RTOS + PSRAM Optimized            ║");
+  Serial.println("║  EggClassifier V2 — Freenove S3 CAM  ║");
+  Serial.println("║  RTOS + PSRAM + SD Optimized         ║");
   Serial.println("╚══════════════════════════════════════╝");
   Serial.printf("[INFO] PSRAM: %lu KB | Heap: %lu KB\n",
     (unsigned long)(ESP.getPsramSize() / 1024),
@@ -439,23 +849,20 @@ void setup() {
     return;
   }
 
-  pinMode(LED_PIN, OUTPUT);
   pinMode(BOOT_BTN, INPUT_PULLUP);
-  digitalWrite(LED_PIN, LOW);
+  neopixelWrite(RGB_LED_PIN, 0, 0, 0);
 
   // 1. LittleFS
   if (!LittleFS.begin(true)) { Serial.println("[ERROR] LittleFS gagal"); return; }
   Serial.println("[OK] LittleFS");
 
-  // 2. AXP313A (power kamera)
-  Wire.begin(CAM_SIOD, CAM_SIOC);
-  if (axp.begin() != 0) { Serial.println("[ERROR] AXP313A tidak ditemukan"); return; }
-  axp.enableCameraPower(axp.eOV2640);
-  vTaskDelay(pdMS_TO_TICKS(100));
-  Serial.println("[OK] AXP313A");
+  // 2. SD card (opsional — tanpa SD, dataset jatuh ke mode download)
+  sdMounted = initSD();
 
   // 3. Kamera — VGA double-buffer, tidak pernah berganti resolusi
+  //    (Freenove: kamera selalu berdaya, tanpa AXP313A)
   if (!initCamera()) return;
+  loadCameraSettings();   // terapkan setting custom tersimpan di NVS
 
   // 4. Pre-alokasi PSRAM decode buffer (921 KB) — zero malloc/free saat inferensi
   rgbArena = (uint8_t*) ps_malloc((size_t)RGB_MAX_W * RGB_MAX_H * 3);
@@ -497,7 +904,7 @@ void setup() {
   }
   if (WiFi.status() == WL_CONNECTED) {
     Serial.printf("\n[OK] WiFi: http://%s\n", WiFi.localIP().toString().c_str());
-    digitalWrite(LED_PIN, HIGH);
+    neopixelWrite(RGB_LED_PIN, 0, 12, 0);
   } else {
     Serial.println("\n[WARN] WiFi gagal — akan retry otomatis via event");
   }
@@ -514,6 +921,16 @@ void setup() {
   server.on("/predict",      HTTP_GET,  handlePredict);
   server.on("/model_info",   HTTP_GET,  handleModelInfo);
   server.on("/upload_model", HTTP_POST, handleUploadDone, handleUploadChunk);
+  server.on("/sd/info",      HTTP_GET,  handleSDInfo);
+  server.on("/sd/capture",   HTTP_POST, handleSDCapture);
+  server.on("/sd/list",      HTTP_GET,  handleSDList);
+  server.on("/sd/file",      HTTP_GET,  handleSDFile);
+  server.on("/sd/delete",    HTTP_POST, handleSDDelete);
+  server.on("/sd/relabel",   HTTP_POST, handleSDRelabel);
+  server.on("/sd/upload",    HTTP_POST, handleSDUploadDone, handleSDUploadChunk);
+  server.on("/camera/get",   HTTP_GET,  handleCamGet);
+  server.on("/camera/set",   HTTP_POST, handleCamSet);
+  server.on("/camera/reset", HTTP_POST, handleCamReset);
   server.begin();
 
   Serial.println("[OK] HTTP server\n");
@@ -526,7 +943,8 @@ void setup() {
     modelLoaded ? "Loaded ✓" : "Belum ada — upload via web");
   Serial.printf( "║  PSRAM  : %-28s║\n",
     (String(ESP.getPsramSize() / 1024) + " KB total").c_str());
-  Serial.printf( "║  Dataset: %-28s║\n", "Download mode (via browser)");
+  Serial.printf( "║  Dataset: %-28s║\n",
+    sdMounted ? "SD card (/dataset)" : "Download mode (SD tidak ada)");
   Serial.println("╚══════════════════════════════════════╝\n");
 }
 

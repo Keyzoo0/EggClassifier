@@ -22,19 +22,14 @@ Sistem klasifikasi telur **on-device** yang mendeteksi kualitas cangkang telur (
 
 | Komponen | Spesifikasi |
 |---|---|
-| Board | DFRobot FireBeetle 2 ESP32-S3 N16R8 v1.0 |
+| Board | Freenove ESP32-S3-WROOM CAM (FNK0085) |
 | MCU | ESP32-S3 Dual-Core Xtensa LX7 @ 240 MHz |
-| Flash | 16 MB |
+| Flash | 8 MB |
 | PSRAM | 8 MB Octal (OPI) |
-| Kamera | OV2640 2MP (onboard, via AXP313A) |
-
-<div align="center">
-
-![Dimensi Board](docs/dimesion.jpg)
-
-*Dimensi Board DFRobot FireBeetle 2 ESP32-S3*
-
-</div>
+| Kamera | OV2640 2MP FOV 66.5° (onboard, selalu berdaya — tanpa AXP) |
+| Penyimpanan | microSD 4 GB, FAT32 (allocation unit 16K), SDMMC 1-bit |
+| LED | WS2812 RGB onboard (GPIO 48) |
+| Daya | 5V / maks 2A (gunakan adaptor/port USB yang kuat) |
 
 <div align="center">
 
@@ -104,20 +99,21 @@ OV2640 (JPEG VGA 640×480 — tidak pernah berganti resolusi)
 ```
 klasifikasiTelur_ESP32_S3_CAM/
 ├── README.md
+├── .github/workflows/
+│   └── train.yml                      # Workflow training otomatis (Actions)
+├── dataset/                           # Dataset sinkron dari SD (via web UI)
+├── model/                             # Hasil training CI: egg_model.tflite + info
 ├── docs/
-│   ├── dimesion.jpg                   # Dimensi board FireBeetle 2
 │   ├── schematic.jpg                  # Skematik rangkaian
 │   ├── prepocessing dataset.png       # Pipeline preprocessing
 │   └── trainResult.png                # Kurva training
-├── CameraTest/
-│   └── CameraTest.ino                 # Uji kamera (Phase 1)
 ├── DataCollector/
-│   └── DataCollector.ino              # Pengumpul dataset awal
+│   └── DataCollector.ino              # Pengumpul dataset awal (legacy)
 ├── training/
-│   ├── KlasifikasiTelur_Training.ipynb  # Google Colab notebook
-│   ├── train.py                         # Script training lokal
+│   ├── KlasifikasiTelur_Training.ipynb  # Google Colab notebook (alternatif)
+│   ├── train.py                         # Script training (lokal & CI)
 │   ├── requirements.txt
-│   └── dataset/                         # Foto telur (tidak di-track)
+│   └── dataset/                         # Foto telur lokal (tidak di-track)
 └── EggClassifierV2/                   # ← Firmware utama
     ├── EggClassifierV2.ino
     └── data/                          # LittleFS — web interface
@@ -134,16 +130,17 @@ klasifikasiTelur_ESP32_S3_CAM/
 
 | Library | Author |
 |---|---|
-| `DFRobot_AXP313A` | DFRobot |
 | `TensorFlowLite_ESP32` | tanakamasayuki |
+
+> Board Freenove tidak memakai AXP313A — kamera selalu berdaya, library DFRobot tidak diperlukan.
 
 ### 2. Konfigurasi Board (Tools)
 
 | Pengaturan | Nilai |
 |---|---|
 | Board | `ESP32S3 Dev Module` |
-| Flash Size | `16MB (128Mb)` |
-| **Partition Scheme** | **`Huge APP (3MB No OTA/1MB SPIFFS)`** ← wajib |
+| Flash Size | `8MB (64Mb)` ← Freenove = 8MB, bukan 16MB |
+| **Partition Scheme** | **`8M with spiffs (3MB APP/1.5MB SPIFFS)`** ← wajib |
 | PSRAM | `OPI PSRAM` |
 | CPU Frequency | `240MHz` |
 | USB CDC On Boot | `Enabled` |
@@ -188,24 +185,64 @@ http://<IP_ADDRESS>      ← IP tampil di Serial Monitor
 
 ## Web Interface
 
-### Tab Dataset — Kumpulkan Data
+### Tab Dataset — Kumpulkan Data (`1`)
 
 | Aksi | Shortcut |
 |---|---|
 | Capture foto BAGUS | Klik tombol hijau atau tekan `G` |
 | Capture foto CACAT | Klik tombol merah atau tekan `B` |
 
-Foto langsung diunduh ke PC sebagai `good_0001.jpg`, `bad_0001.jpg`, dst.
-Counter tersimpan di `localStorage` browser sehingga tidak reset saat refresh.
-Pindahkan file ke folder dataset, lalu jalankan training di Google Colab.
+Dengan SD card terpasang, foto tersimpan langsung di alat (`/dataset/good_0001.jpg` dst.)
+dan counter dihitung dari isi SD — tidak hilang saat ganti browser.
+Tanpa SD card, otomatis jatuh ke mode lama: foto diunduh ke PC.
 
-### Tab Prediksi — Klasifikasi Real-time
+### Tab Kelola — CRUD Dataset di SD (`2`)
+
+Galeri seluruh foto dataset di SD card dengan operasi lengkap:
+
+| Operasi | Cara |
+|---|---|
+| **Create** | Upload JPEG dari PC (multi-file) sebagai BAGUS / CACAT |
+| **Read** | Galeri thumbnail (filter Semua/Bagus/Cacat, lazy-load 24/batch), ketuk untuk ukuran penuh |
+| **Update** | 🔁 pindah label good ↔ bad (file di-rename di SD) |
+| **Delete** | 🗑️ hapus foto (dengan konfirmasi) |
+
+Saat tab ini terbuka, **preview kamera dimatikan** (polling berhenti + area preview
+disembunyikan) agar bandwidth ESP32 fokus memuat foto dari SD.
+Saat sinkron training berikutnya, perubahan ikut diterapkan ke repo GitHub —
+foto yang dihapus di SD juga dihapus dari repo (SD = sumber kebenaran).
+
+### Tab Training — Pipeline Otomatis (`3`)
+
+Satu tombol **"Sinkron + Training + Pasang Model"** menjalankan seluruh pipeline:
+
+1. **Sinkron** — foto baru di SD diunggah browser ke folder `dataset/` repo GitHub
+2. **Training** — workflow GitHub Actions (`train.yml`) melatih MobileNetV1 α=0.25 INT8
+3. **Pasang** — model hasil training diunduh dan dipasang otomatis ke ESP32
+
+Konfigurasi sekali di kartu **Pengaturan GitHub** (owner, repo, branch, fine-grained PAT).
+Token hanya disimpan di `localStorage` browser — tidak pernah menyentuh ESP32.
+
+### Tab Prediksi — Klasifikasi Real-time (`4`)
 
 | Aksi | Shortcut |
 |---|---|
 | Jalankan klasifikasi | Klik tombol biru atau tekan `C` |
 
 Output: label (BAGUS / TIDAK BAGUS), skor sigmoid, tingkat keyakinan, waktu inferensi.
+
+### Tab Kamera — Pengaturan Sensor (`5`)
+
+Kontrol penuh semua parameter OV2640: brightness, contrast, saturation, efek khusus,
+kualitas JPEG, white balance (auto/manual + mode), exposure (AEC auto/manual, AE level),
+gain (AGC, gain ceiling), koreksi pixel/gamma/lensa, mirror & flip, dan color bar.
+
+Semua perubahan langsung terlihat di preview dan **tersimpan permanen di NVS** —
+tidak hilang saat alat dimatikan.
+
+> 💡 **Tips akurasi:** atur pencahayaan tetap, matikan Auto Exposure dan Auto White
+> Balance, lalu gunakan setting yang sama saat mengumpulkan dataset dan prediksi.
+> Sensor yang konsisten = model yang akurat.
 
 ---
 
@@ -218,22 +255,50 @@ Output: label (BAGUS / TIDAK BAGUS), skor sigmoid, tingkat keyakinan, waktu infe
 | GET | `/predict` | Jalankan inferensi → JSON `{label, score, time_ms, good}` |
 | GET | `/model_info` | Status model `{loaded, size_kb, arena_kb}` |
 | POST | `/upload_model` | Upload file `.tflite` → LittleFS → restart |
+| GET | `/sd/info` | Status SD `{mounted, good, bad, used_mb, total_mb}` |
+| POST | `/sd/capture?label=good\|bad` | Capture → simpan JPEG ke SD `/dataset/` |
+| GET | `/sd/list` | Daftar file dataset di SD (JSON) |
+| GET | `/sd/file?name=...` | Stream satu foto dataset dari SD |
+| POST | `/sd/delete?name=...` | Hapus satu foto dataset |
+| POST | `/sd/relabel?name=...` | Pindah label good ↔ bad (rename di SD) |
+| POST | `/sd/upload?label=good\|bad` | Upload JPEG dari PC ke dataset SD |
+| GET | `/camera/get` | JSON semua parameter sensor OV2640 |
+| POST | `/camera/set?var=...&val=...` | Set parameter kamera → tersimpan di NVS |
+| POST | `/camera/reset` | Reset semua setting kamera → default pabrik (restart) |
 
 ---
 
-## Training — Google Colab
+## Training
 
-Buka notebook [`training/KlasifikasiTelur_Training.ipynb`](training/KlasifikasiTelur_Training.ipynb) di Google Colab.
+### Cara 1 — Otomatis via Web UI (GitHub Actions) ← direkomendasikan
 
-### Pipeline Training
+Repo target (`Keyzoo0/EggClassifier` @ `main`) sudah tertanam di web UI — tidak ada
+form pengaturan. Saat pertama kali klik Train, browser meminta **fine-grained PAT**
+sekali (GitHub → Settings → Developer settings → Fine-grained tokens → akses repo ini
+saja, permission **Contents: Read & Write** + **Actions: Read & Write**), lalu token
+tersimpan di browser. Tombol 🔑 di tab Training untuk menggantinya.
 
-1. **Upload dataset** — ZIP dari PC atau salin dari Google Drive
-   - Format nama file: `good_0001.jpg`, `bad_0001.jpg`, dst.
-2. **Augmentasi** — flip, brightness, contrast, saturation, hue, crop-resize (×30 per epoch)
-3. **Fase 1** — Train head only (60 epoch, base MobileNetV1 frozen)
-4. **Fase 2** — Fine-tune 20 layer terakhir (40 epoch, lr=1e-5)
+> Token sengaja tidak ditanam di kode: token yang ter-push ke repo akan otomatis
+> dicabut oleh GitHub secret scanning.
+
+Selanjutnya cukup satu klik **"Sinkron + Training + Pasang Model"**.
+Training berjalan di runner GitHub (gratis untuk repo publik, ±20–40 menit CPU),
+hasilnya di-commit sebagai `model/egg_model.tflite` + `model/model_info.json`,
+lalu otomatis dipasang ke alat. Progres bisa dipantau di tab Actions GitHub.
+
+### Cara 2 — Manual via Google Colab
+
+Buka notebook [`training/KlasifikasiTelur_Training.ipynb`](training/KlasifikasiTelur_Training.ipynb) di Google Colab,
+lalu upload model hasilnya lewat tab Prediksi.
+
+### Pipeline Training (kedua cara sama)
+
+1. **Dataset** — format nama file: `good_0001.jpg`, `bad_0001.jpg`, dst.
+2. **Augmentasi** — flip, brightness, contrast, saturation, hue, crop-resize
+3. **Fase 1** — Train head only (base MobileNetV1 frozen)
+4. **Fase 2** — Fine-tune 20 layer terakhir (lr=1e-5)
 5. **Konversi INT8** — full integer quantization, representative dataset
-6. **Generate** `egg_model.h` — download lalu copy ke folder sketch
+6. **Output** — `egg_model.tflite` (CI: + `model_info.json` berisi akurasi & metadata)
 
 ### Hasil Training (Dataset 25 foto)
 
@@ -246,27 +311,42 @@ Buka notebook [`training/KlasifikasiTelur_Training.ipynb`](training/KlasifikasiT
 
 ---
 
-## LED Indikator
+## LED Indikator (WS2812 RGB onboard)
 
 | Kondisi | LED |
 |---|---|
-| Booting / Connecting WiFi | Kedip cepat (250ms) |
-| WiFi terhubung | Menyala solid |
-| WiFi putus / reconnecting | Kedip cepat |
+| Booting / Connecting WiFi | Biru kedip (250ms) |
+| WiFi terhubung | Hijau redup solid |
+| WiFi putus / reconnecting | Biru kedip |
+| Hasil klasifikasi BAGUS | Hijau terang 1,5 detik |
+| Hasil klasifikasi TIDAK BAGUS | Merah terang 1,5 detik |
 
 ---
 
-## Pin Mapping Kamera
+## Pin Mapping — Freenove FNK0085
+
+**Kamera (profil `CAMERA_MODEL_ESP32S3_EYE`):**
 
 | Signal | GPIO |
 |---|---|
-| XCLK | 45 |
-| SDA (SCCB) | 1 |
-| SCL (SCCB) | 2 |
-| D0–D7 | 39, 40, 41, 4, 7, 8, 46, 48 |
+| XCLK | 15 |
+| SDA (SCCB) | 4 |
+| SCL (SCCB) | 5 |
+| D0–D7 (Y2–Y9) | 11, 9, 8, 10, 12, 18, 17, 16 |
 | VSYNC | 6 |
-| HREF | 42 |
-| PCLK | 5 |
+| HREF | 7 |
+| PCLK | 13 |
+
+**SD card (SDMMC 1-bit) & LED:**
+
+| Signal | GPIO |
+|---|---|
+| SD CMD | 38 |
+| SD CLK | 39 |
+| SD D0 | 40 |
+| WS2812 RGB LED | 48 |
+
+> Tidak ada konflik pin kamera ↔ SD card di board ini — keduanya aktif bersamaan.
 
 ## Status Pengembangan
 
@@ -277,13 +357,15 @@ Buka notebook [`training/KlasifikasiTelur_Training.ipynb`](training/KlasifikasiT
 | Phase 3 | Pengumpulan dataset | ⚠️ 25 foto (target 100+/kelas) |
 | Phase 4 | Training MobileNetV1 α=0.25 INT8 | ✅ DONE |
 | Phase 5 | EggClassifierV2 — firmware + web + dual-core | ✅ DONE |
-| Phase 6 | Optimasi RTOS + PSRAM — hapus SD, zero-alloc inference | ✅ DONE |
+| Phase 6 | Optimasi RTOS + PSRAM — zero-alloc inference | ✅ DONE |
+| Phase 7 | Migrasi Freenove FNK0085 + SD card + pipeline training GitHub Actions | 🔄 Testing hardware |
 
 ---
 
 ## Referensi
 
-- [DFRobot FireBeetle 2 Wiki](https://wiki.dfrobot.com/SKU_DFR0975_FireBeetle_2_Board_ESP32_S3)
+- [Freenove ESP32-S3-WROOM Board (FNK0085)](https://github.com/Freenove/Freenove_ESP32_S3_WROOM_Board)
+- [Dokumentasi FNK0085](https://docs.freenove.com/projects/fnk0085/en/latest/)
 - [esp32-camera — Espressif](https://github.com/espressif/esp32-camera)
 - [TensorFlowLite_ESP32 — tanakamasayuki](https://github.com/tanakamasayuki/Arduino_TensorFlowLite_ESP32)
 - [MobileNets — Howard et al.](https://arxiv.org/abs/1704.04861)

@@ -118,6 +118,10 @@ body {
   cursor: pointer;
   transition: all 0.25s ease;
   letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+@media (max-width: 460px) {
+  .tab-pill { font-size: 10px; padding: 8px 0; }
 }
 .tab-pill:hover:not(.active) {
   color: var(--text-1);
@@ -479,6 +483,232 @@ body {
   border: 1px solid rgba(245,158,11,0.25);
   border-radius: var(--radius-sm);
   padding: 12px 14px;
+}
+
+/* ── Form inputs (tab Training) ───────────────────────────── */
+.input-label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-2);
+  margin-bottom: 4px;
+  letter-spacing: 0.02em;
+}
+.input {
+  width: 100%;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border-hi);
+  border-radius: var(--radius-sm);
+  padding: 9px 12px;
+  font-size: 13px;
+  font-family: 'Inter', sans-serif;
+  color: var(--text-1);
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+.input:focus { border-color: var(--primary); }
+.input::placeholder { color: var(--text-3); }
+
+/* ── Pipeline step indicator ──────────────────────────────── */
+.step-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border);
+  font-size: 12px;
+}
+.step-icon {
+  width: 22px; height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid var(--border-hi);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-2);
+}
+.step-row.step-active .step-icon {
+  background: rgba(99,102,241,0.2);
+  border-color: var(--primary);
+  color: var(--primary);
+}
+.step-row.step-done .step-icon {
+  background: rgba(34,197,94,0.15);
+  border-color: var(--success);
+  color: var(--success);
+}
+.step-row.step-fail .step-icon {
+  background: rgba(239,68,68,0.15);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+.step-text  { flex: 1; color: var(--text-1); }
+.step-state { font-family: 'JetBrains Mono', monospace; font-size: 11px; }
+
+/* ── Mini button ──────────────────────────────────────────── */
+.btn-mini {
+  border: 1px solid var(--border-hi);
+  background: rgba(255,255,255,0.04);
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 600;
+  font-family: 'Inter', sans-serif;
+  padding: 4px 12px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.btn-mini:hover { color: var(--text-1); border-color: var(--primary); }
+
+/* ── Camera settings (tab Kamera) ─────────────────────────── */
+.setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  transition: opacity 0.2s ease;
+}
+.setting-row:last-child { border-bottom: none; }
+.setting-label {
+  font-size: 13px;
+  color: var(--text-1);
+  flex-shrink: 0;
+  max-width: 46%;
+  line-height: 1.3;
+}
+.setting-hint {
+  display: block;
+  font-size: 10px;
+  color: var(--text-3);
+  margin-top: 1px;
+}
+.setting-ctl { flex: 1; min-width: 0; }
+select.setting-ctl { max-width: 52%; padding: 7px 10px; font-size: 12px; }
+
+.range-value {
+  min-width: 38px;
+  text-align: right;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  color: var(--primary);
+  font-weight: 600;
+}
+input.range {
+  flex: 1;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 5px;
+  background: rgba(255,255,255,0.08);
+  border-radius: 999px;
+  outline: none;
+  cursor: pointer;
+}
+input.range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #4f46e5, #7c3aed);
+  border: 2px solid #a5b4fc;
+  cursor: pointer;
+  transition: transform 0.15s ease;
+}
+input.range::-webkit-slider-thumb:hover { transform: scale(1.15); }
+input.range::-moz-range-thumb {
+  width: 14px; height: 14px;
+  border-radius: 50%;
+  background: #6366f1;
+  border: 2px solid #a5b4fc;
+  cursor: pointer;
+}
+input.range:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* Toggle switch */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 40px; height: 22px;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.switch input { opacity: 0; width: 0; height: 0; }
+.switch-track {
+  position: absolute;
+  inset: 0;
+  background: rgba(255,255,255,0.1);
+  border: 1px solid var(--border-hi);
+  border-radius: 999px;
+  transition: all 0.2s ease;
+}
+.switch-track::before {
+  content: '';
+  position: absolute;
+  width: 16px; height: 16px;
+  left: 2px; top: 2px;
+  background: #94a3b8;
+  border-radius: 50%;
+  transition: all 0.2s ease;
+}
+.switch input:checked + .switch-track {
+  background: rgba(99,102,241,0.45);
+  border-color: var(--primary);
+}
+.switch input:checked + .switch-track::before {
+  transform: translateX(18px);
+  background: #c7d2fe;
+}
+.switch input:disabled + .switch-track { opacity: 0.4; cursor: not-allowed; }
+
+/* ── Kelola dataset (tab Kelola) ──────────────────────────── */
+.ds-tile {
+  position: relative;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  aspect-ratio: 4/3;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border);
+}
+.ds-tile img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  cursor: zoom-in;
+}
+.ds-actions {
+  position: absolute;
+  top: 4px; right: 4px;
+  display: flex;
+  gap: 4px;
+}
+.ds-act {
+  width: 28px; height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255,255,255,0.15);
+  border-radius: 8px;
+  background: rgba(0,0,0,0.55);
+  backdrop-filter: blur(4px);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.ds-act:hover { background: rgba(99,102,241,0.5); transform: scale(1.08); }
+.ds-act-danger:hover { background: rgba(220,38,38,0.6); }
+
+.ds-filter.active {
+  background: rgba(99,102,241,0.2);
+  border-color: var(--primary);
+  color: var(--primary);
 }
 
 /* ── kbd shortcut ─────────────────────────────────────────── */
