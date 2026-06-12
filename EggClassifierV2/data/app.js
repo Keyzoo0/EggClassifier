@@ -369,14 +369,18 @@ async function loadModelInfo() {
     const el   = document.getElementById('model-status');
     const warn = document.getElementById('no-model-warning');
 
+    const errEl = document.getElementById('model-err');
     if (data.loaded) {
       el.textContent = '✓ ' + data.size_kb + ' KB';
       el.className   = 'badge-loaded';
       warn.classList.add('hidden');
     } else {
-      el.textContent = 'Tidak ada model';
+      el.textContent = data.err ? 'Model gagal dimuat' : 'Tidak ada model';
       el.className   = 'badge-missing';
       warn.classList.remove('hidden');
+      // Tampilkan alasan dari firmware (mis. op tidak terdaftar / arena kurang)
+      errEl.classList.toggle('hidden', !data.err);
+      if (data.err) errEl.textContent = '⛔ ' + data.err;
     }
   } catch (_) {}
 }
@@ -727,10 +731,11 @@ function trainStatus(msg, pct) {
 // SD card = sumber kebenaran: foto baru di-upload, foto yang sudah
 // dihapus/dipindah label di SD ikut dihapus dari repo.
 async function syncDataset() {
-  // Isi repo saat ini (nama → sha, perlu sha untuk delete)
+  // Isi repo saat ini (nama → sha+size; sha perlu untuk update/delete)
   const repoFiles = new Map();
   const lsRes = await gh('/contents/dataset?ref=' + ghCfg.branch);
-  if (lsRes.ok) (await lsRes.json()).forEach(f => repoFiles.set(f.name, f.sha));
+  if (lsRes.ok) (await lsRes.json()).forEach(f =>
+    repoFiles.set(f.name, { sha: f.sha, size: f.size }));
   else if (lsRes.status !== 404) throw new Error('Gagal baca repo (' + lsRes.status + ')');
 
   const sdRes  = await fetch('/sd/list');
@@ -738,7 +743,12 @@ async function syncDataset() {
   if (sdList.error) throw new Error('SD: ' + sdList.error);
   const sdNames = new Set(sdList.map(f => f.n));
 
-  const toUpload = sdList.filter(f => !repoFiles.has(f.n));
+  // Upload jika: nama belum ada di repo, ATAU nama sama tapi ukuran beda
+  // (index bekas hapus dipakai ulang oleh foto baru → isi file berubah)
+  const toUpload = sdList.filter(f => {
+    const r = repoFiles.get(f.n);
+    return !r || r.size !== f.s;
+  });
   const toDelete = [...repoFiles.keys()]
     .filter(n => /\.(jpg|jpeg)$/i.test(n) && !sdNames.has(n));
   const total = toUpload.length + toDelete.length;
@@ -749,13 +759,17 @@ async function syncDataset() {
     if (!img.ok) throw new Error('Gagal baca ' + f.n + ' dari SD');
     const b64 = await blobToBase64(await img.blob());
 
+    const body = {
+      message: 'dataset: tambah/update ' + f.n,
+      content: b64,
+      branch:  ghCfg.branch,
+    };
+    const prev = repoFiles.get(f.n);
+    if (prev) body.sha = prev.sha;   // update file lama (nama dipakai ulang)
+
     const put = await gh('/contents/dataset/' + encodeURIComponent(f.n), {
       method: 'PUT',
-      body: JSON.stringify({
-        message: 'dataset: tambah ' + f.n,
-        content: b64,
-        branch:  ghCfg.branch,
-      }),
+      body: JSON.stringify(body),
     });
     if (!put.ok) throw new Error('Upload ' + f.n + ' gagal (' + put.status + ')');
 

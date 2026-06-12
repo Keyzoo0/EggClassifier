@@ -108,13 +108,54 @@ WebServer server(80);
 
 // SD card state
 bool     sdMounted = false;
-uint32_t sdCntGood = 0;   // index file terakhir per label
+uint32_t sdCntGood = 0;   // jumlah file AKTUAL per label (bukan max index)
 uint32_t sdCntBad  = 0;
+
+// Bitmap index terpakai per label — file baru mengisi celah index
+// terendah (bekas hapus dipakai ulang), bukan lanjut dari max.
+#define SD_MAX_IDX 9999
+static uint8_t sdGoodMap[(SD_MAX_IDX / 8) + 1];
+static uint8_t sdBadMap [(SD_MAX_IDX / 8) + 1];
+
+static inline void sdIdxMark(bool good, uint32_t n, bool used) {
+  if (n < 1 || n > SD_MAX_IDX) return;
+  uint8_t* m = good ? sdGoodMap : sdBadMap;
+  if (used) m[n >> 3] |=  (1 << (n & 7));
+  else      m[n >> 3] &= ~(1 << (n & 7));
+}
+static inline bool sdIdxUsed(bool good, uint32_t n) {
+  const uint8_t* m = good ? sdGoodMap : sdBadMap;
+  return m[n >> 3] & (1 << (n & 7));
+}
+static uint32_t sdNextIdx(bool good) {   // index kosong terendah, 0 = penuh
+  for (uint32_t n = 1; n <= SD_MAX_IDX; n++)
+    if (!sdIdxUsed(good, n)) return n;
+  return 0;
+}
+// Parse "good_0012.jpg" → label + index
+static bool sdParseName(const char* base, bool* isGood, uint32_t* idx) {
+  unsigned long n = 0;
+  if (sscanf(base, "good_%lu", &n) == 1) { *isGood = true;  *idx = n; return true; }
+  if (sscanf(base, "bad_%lu",  &n) == 1) { *isGood = false; *idx = n; return true; }
+  return false;
+}
 
 // TFLite
 static uint8_t*                           tensorArena = nullptr;
-static tflite::MicroMutableOpResolver<10> resolver;
-static tflite::MicroErrorReporter        tfliteErrReporter;
+static tflite::MicroMutableOpResolver<12> resolver;
+
+// Error reporter yang menyimpan pesan terakhir — alasan gagal load
+// model (mis. op tidak terdaftar) bisa dilihat di web via /model_info
+class BufErrorReporter : public tflite::ErrorReporter {
+ public:
+  char last[96] = "";
+  int Report(const char* format, va_list args) override {
+    vsnprintf(last, sizeof(last), format, args);
+    Serial.printf("[TF] %s\n", last);
+    return 0;
+  }
+};
+static BufErrorReporter tfliteErrReporter;
 static tflite::MicroInterpreter*          interpreter = nullptr;
 static TfLiteTensor*                      inTensor    = nullptr;
 static TfLiteTensor*                      outTensor   = nullptr;
@@ -354,13 +395,19 @@ bool initTFLite() {
 
   const tflite::Model* model = tflite::GetModel(buf);
   if (model->version() != TFLITE_SCHEMA_VERSION) {
-    Serial.println("[TF] Schema version mismatch");
+    snprintf(tfliteErrReporter.last, sizeof(tfliteErrReporter.last),
+             "schema v%d != v%d", (int)model->version(), TFLITE_SCHEMA_VERSION);
+    Serial.printf("[TF] %s\n", tfliteErrReporter.last);
     free(buf); return false;
   }
 
   if (!tensorArena) {
     tensorArena = (uint8_t*) ps_malloc(ARENA_SIZE);
-    if (!tensorArena) { free(buf); Serial.println("[TF] ps_malloc arena gagal"); return false; }
+    if (!tensorArena) {
+      snprintf(tfliteErrReporter.last, sizeof(tfliteErrReporter.last),
+               "ps_malloc arena gagal");
+      free(buf); Serial.println("[TF] ps_malloc arena gagal"); return false;
+    }
   }
   memset(tensorArena, 0, ARENA_SIZE);
 
@@ -370,9 +417,11 @@ bool initTFLite() {
   interpreter = &interp;
 
   if (interpreter->AllocateTensors() != kTfLiteOk) {
-    Serial.println("[TF] AllocateTensors gagal — coba perbesar ARENA_SIZE");
+    // Detail (mis. op tidak terdaftar) sudah tertangkap di errReporter.last
+    Serial.println("[TF] AllocateTensors gagal — cek op resolver / ARENA_SIZE");
     return false;
   }
+  tfliteErrReporter.last[0] = '\0';   // sukses — bersihkan error lama
 
   inTensor  = interpreter->input(0);
   outTensor = interpreter->output(0);
@@ -396,15 +445,17 @@ bool initSD() {
   }
   if (!SD_MMC.exists(SD_DATASET_DIR)) SD_MMC.mkdir(SD_DATASET_DIR);
 
-  // Scan index terakhir tiap label (format: good_0001.jpg / bad_0001.jpg)
+  // Scan dataset: hitung file aktual per label + tandai index terpakai
   File dir = SD_MMC.open(SD_DATASET_DIR);
   File f;
   while ((f = dir.openNextFile())) {
     const char* base = strrchr(f.name(), '/');
     base = base ? base + 1 : f.name();
-    unsigned long n = 0;
-    if      (sscanf(base, "good_%lu", &n) == 1) { if (n > sdCntGood) sdCntGood = n; }
-    else if (sscanf(base, "bad_%lu",  &n) == 1) { if (n > sdCntBad)  sdCntBad  = n; }
+    bool g; uint32_t n;
+    if (!f.isDirectory() && sdParseName(base, &g, &n)) {
+      sdIdxMark(g, n, true);
+      if (g) sdCntGood++; else sdCntBad++;
+    }
     f.close();
   }
   dir.close();
@@ -446,10 +497,13 @@ void handleSDCapture() {
     server.send(400, "application/json", "{\"error\":\"bad_label\"}"); return;
   }
 
+  const bool isGood = (label == "good");
+  uint32_t n = sdNextIdx(isGood);   // isi celah terendah (bekas hapus)
+  if (n == 0) { server.send(507, "application/json", "{\"error\":\"dataset_full\"}"); return; }
+
   camera_fb_t* fb = esp_camera_fb_get();
   if (!fb) { server.send(503, "application/json", "{\"error\":\"camera_failed\"}"); return; }
 
-  uint32_t n = (label == "good") ? sdCntGood + 1 : sdCntBad + 1;
   char path[48];
   snprintf(path, sizeof(path), SD_DATASET_DIR "/%s_%04lu.jpg",
            label.c_str(), (unsigned long)n);
@@ -470,7 +524,8 @@ void handleSDCapture() {
     return;
   }
 
-  if (label == "good") sdCntGood = n; else sdCntBad = n;
+  sdIdxMark(isGood, n, true);
+  if (isGood) sdCntGood++; else sdCntBad++;
 
   char resp[160];
   snprintf(resp, sizeof(resp),
@@ -539,6 +594,15 @@ void handleSDDelete() {
   if (!SD_MMC.exists(path)) { server.send(404, "application/json", "{\"error\":\"not_found\"}"); return; }
 
   bool ok = SD_MMC.remove(path);
+  if (ok) {
+    // Bebaskan index agar bisa dipakai capture berikutnya + koreksi jumlah
+    bool g; uint32_t idx;
+    if (sdParseName(name.c_str(), &g, &idx)) {
+      sdIdxMark(g, idx, false);
+      if (g) { if (sdCntGood) sdCntGood--; }
+      else   { if (sdCntBad)  sdCntBad--;  }
+    }
+  }
   server.send(ok ? 200 : 500, "application/json",
               ok ? "{\"ok\":true}" : "{\"error\":\"delete_failed\"}");
 }
@@ -552,15 +616,16 @@ void handleSDRelabel() {
   String name = server.arg("name");
   if (!sdNameValid(name)) { server.send(400, "application/json", "{\"error\":\"bad_name\"}"); return; }
 
-  bool fromGood = name.startsWith("good_");
-  if (!fromGood && !name.startsWith("bad_")) {
+  bool fromGood; uint32_t oldIdx;
+  if (!sdParseName(name.c_str(), &fromGood, &oldIdx)) {
     server.send(400, "application/json", "{\"error\":\"bad_label\"}"); return;
   }
 
   String from = String(SD_DATASET_DIR) + "/" + name;
   if (!SD_MMC.exists(from)) { server.send(404, "application/json", "{\"error\":\"not_found\"}"); return; }
 
-  uint32_t n = fromGood ? sdCntBad + 1 : sdCntGood + 1;
+  uint32_t n = sdNextIdx(!fromGood);   // celah terendah di label tujuan
+  if (n == 0) { server.send(507, "application/json", "{\"error\":\"dataset_full\"}"); return; }
   char newName[32];
   snprintf(newName, sizeof(newName), "%s_%04lu.jpg",
            fromGood ? "bad" : "good", (unsigned long)n);
@@ -568,7 +633,10 @@ void handleSDRelabel() {
   if (!SD_MMC.rename(from, String(SD_DATASET_DIR) + "/" + newName)) {
     server.send(500, "application/json", "{\"error\":\"rename_failed\"}"); return;
   }
-  if (fromGood) sdCntBad = n; else sdCntGood = n;
+  sdIdxMark(fromGood,  oldIdx, false);
+  sdIdxMark(!fromGood, n,      true);
+  if (fromGood) { if (sdCntGood) sdCntGood--; sdCntBad++; }
+  else          { if (sdCntBad)  sdCntBad--;  sdCntGood++; }
 
   char resp[128];
   snprintf(resp, sizeof(resp),
@@ -596,7 +664,8 @@ void handleSDUploadChunk() {
     if (!sdMounted || (label != "good" && label != "bad")) { sdUpError = true; return; }
 
     sdUpIsGood = (label == "good");
-    sdUpIdx    = (sdUpIsGood ? sdCntGood : sdCntBad) + 1;
+    sdUpIdx    = sdNextIdx(sdUpIsGood);   // isi celah terendah
+    if (sdUpIdx == 0) { sdUpError = true; return; }
     char path[48];
     snprintf(path, sizeof(path), SD_DATASET_DIR "/%s_%04lu.jpg",
              label.c_str(), (unsigned long)sdUpIdx);
@@ -610,7 +679,8 @@ void handleSDUploadChunk() {
   } else if (up.status == UPLOAD_FILE_END) {
     if (sdUpFile) sdUpFile.close();
     if (!sdUpError && up.totalSize > 0) {
-      if (sdUpIsGood) sdCntGood = sdUpIdx; else sdCntBad = sdUpIdx;
+      sdIdxMark(sdUpIsGood, sdUpIdx, true);
+      if (sdUpIsGood) sdCntGood++; else sdCntBad++;
     }
   } else if (up.status == UPLOAD_FILE_ABORTED) {
     if (sdUpFile) sdUpFile.close();
@@ -662,12 +732,18 @@ void handleCapture() {
 // HTTP: info model
 // ─────────────────────────────────────────────────────────────
 void handleModelInfo() {
-  char resp[128];
+  // Pesan error TFLite bisa mengandung kutip ganda — ganti agar JSON valid
+  char err[96];
+  strlcpy(err, tfliteErrReporter.last, sizeof(err));
+  for (char* p = err; *p; p++) if (*p == '"') *p = '\'';
+
+  char resp[256];
   snprintf(resp, sizeof(resp),
-    "{\"loaded\":%s,\"size_kb\":%d,\"arena_kb\":%d}",
+    "{\"loaded\":%s,\"size_kb\":%d,\"arena_kb\":%d,\"err\":\"%s\"}",
     modelLoaded ? "true" : "false",
     (int)modelSizeKB,
-    modelLoaded ? (int)(interpreter->arena_used_bytes() / 1024) : 0);
+    modelLoaded ? (int)(interpreter->arena_used_bytes() / 1024) : 0,
+    err);
   server.send(200, "application/json", resp);
 }
 
@@ -874,6 +950,8 @@ void setup() {
   resolver.AddConv2D();
   resolver.AddDepthwiseConv2D();
   resolver.AddAveragePool2D();
+  resolver.AddMean();      // GlobalAveragePooling2D → MEAN di TF ≥2.x
+  resolver.AddPad();       // ZeroPadding2D pada blok stride-2 MobileNetV1
   resolver.AddReshape();
   resolver.AddFullyConnected();
   resolver.AddLogistic();
