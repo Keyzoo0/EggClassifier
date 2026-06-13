@@ -57,11 +57,12 @@
  */
 
 #include <WiFi.h>
-#include <WebServer.h>
+#include <ESPAsyncWebServer.h>   // server non-blocking (ganti WebServer sinkron)
 #include <ESPmDNS.h>
 #include <LittleFS.h>
 #include <SD_MMC.h>
 #include <Preferences.h>
+#include <memory>                // shared_ptr — buffer frame kamera async
 #include "esp_camera.h"
 #include "img_converters.h"
 #include "TensorFlowLite_ESP32.h"
@@ -123,7 +124,17 @@
 #define CROP_SZ     96
 
 // ── Global ────────────────────────────────────────────────────
-WebServer server(80);
+AsyncWebServer server(80);
+
+// Restart tertunda — handler async tidak boleh blok/restart langsung; set
+// waktu di sini, loop() yang eksekusi setelah response sempat terkirim.
+volatile uint32_t restartAt = 0;
+
+// Helper baca query param (frontend kirim via URL, mis. ?label=good)
+static String reqArg(AsyncWebServerRequest* r, const char* k) {
+  const AsyncWebParameter* p = r->getParam(k);
+  return p ? p->value() : String();
+}
 
 // SD card state
 bool     sdMounted = false;
@@ -246,23 +257,33 @@ void applyFlash() {
   flashStrip.show();
 }
 
-// Isi LED satu per satu dengan satu warna (efek wipe)
-void flashColorWipe(uint32_t color, int wait) {
-  for (int i = 0; i < FLASH_NUM; i++) {
-    flashStrip.setPixelColor(i, color);
-    flashStrip.show();
-    delay(wait);
-  }
-}
+// Animasi boot: colorWipe merah→hijau→biru BERULANG selama setup berjalan,
+// dijalankan di task terpisah agar terus berputar walau setup memblokir
+// (mis. nunggu WiFi). Berhenti saat bootAnimRun=false.
+volatile bool       bootAnimRun    = true;
+TaskHandle_t        bootAnimHandle = NULL;
 
-// Animasi awal setup: colorWipe merah → hijau → biru, lalu mati
-void flashBootIntro() {
+void bootAnimTask(void* pv) {
   flashStrip.setBrightness(50);   // 50 cukup terang & tidak menyilaukan
-  flashColorWipe(flashStrip.Color(255, 0, 0), 50);   // merah
-  flashColorWipe(flashStrip.Color(0, 255, 0), 50);   // hijau
-  flashColorWipe(flashStrip.Color(0, 0, 255), 50);   // biru
+  const uint32_t cols[3] = {
+    flashStrip.Color(255, 0, 0), flashStrip.Color(0, 255, 0), flashStrip.Color(0, 0, 255),
+  };
+  int ci = 0;
+  while (bootAnimRun) {
+    for (int i = 0; i < FLASH_NUM && bootAnimRun; i++) {
+      flashStrip.setPixelColor(i, cols[ci]);
+      flashStrip.show();
+      vTaskDelay(pdMS_TO_TICKS(45));
+    }
+    flashStrip.clear();
+    flashStrip.show();
+    vTaskDelay(pdMS_TO_TICKS(40));
+    ci = (ci + 1) % 3;
+  }
   flashStrip.clear();
   flashStrip.show();
+  bootAnimHandle = NULL;
+  vTaskDelete(NULL);
 }
 
 // Tanda setup selesai: kedip putih 2× sebelum masuk loop
@@ -379,9 +400,9 @@ void loadCameraSettings() {
 // ─────────────────────────────────────────────────────────────
 // HTTP: baca semua parameter kamera (dari register sensor)
 // ─────────────────────────────────────────────────────────────
-void handleCamGet() {
+void handleCamGet(AsyncWebServerRequest* request) {
   sensor_t* s = esp_camera_sensor_get();
-  if (!s) { server.send(503, "application/json", "{\"error\":\"no_camera\"}"); return; }
+  if (!s) { request->send(503, "application/json", "{\"error\":\"no_camera\"}"); return; }
 
   char resp[640];
   snprintf(resp, sizeof(resp),
@@ -398,24 +419,24 @@ void handleCamGet() {
     s->status.agc_gain, s->status.gainceiling, s->status.bpc,
     s->status.wpc, s->status.raw_gma, s->status.lenc,
     s->status.hmirror, s->status.vflip, s->status.dcw, s->status.colorbar);
-  server.send(200, "application/json", resp);
+  request->send(200, "application/json", resp);
 }
 
 // ─────────────────────────────────────────────────────────────
 // HTTP: set satu parameter (/camera/set?var=brightness&val=1)
 // ─────────────────────────────────────────────────────────────
-void handleCamSet() {
+void handleCamSet(AsyncWebServerRequest* request) {
   sensor_t* s = esp_camera_sensor_get();
-  if (!s) { server.send(503, "application/json", "{\"error\":\"no_camera\"}"); return; }
+  if (!s) { request->send(503, "application/json", "{\"error\":\"no_camera\"}"); return; }
 
-  String var = server.arg("var");
-  if (!server.hasArg("var") || !server.hasArg("val")) {
-    server.send(400, "application/json", "{\"error\":\"missing_args\"}"); return;
+  if (!request->hasParam("var") || !request->hasParam("val")) {
+    request->send(400, "application/json", "{\"error\":\"missing_args\"}"); return;
   }
-  int val = server.arg("val").toInt();
+  String var = reqArg(request, "var");
+  int val = reqArg(request, "val").toInt();
 
   if (!applyCameraSetting(s, var, val)) {
-    server.send(400, "application/json", "{\"error\":\"bad_var_or_val\"}"); return;
+    request->send(400, "application/json", "{\"error\":\"bad_var_or_val\"}"); return;
   }
 
   // Persist ke NVS — kecuali colorbar (pola tes, tidak perlu permanen)
@@ -428,20 +449,19 @@ void handleCamSet() {
   char resp[80];
   snprintf(resp, sizeof(resp), "{\"ok\":true,\"var\":\"%s\",\"val\":%d}",
            var.c_str(), val);
-  server.send(200, "application/json", resp);
+  request->send(200, "application/json", resp);
 }
 
 // ─────────────────────────────────────────────────────────────
 // HTTP: reset semua setting kamera → default pabrik (restart)
 // ─────────────────────────────────────────────────────────────
-void handleCamReset() {
+void handleCamReset(AsyncWebServerRequest* request) {
   camPrefs.begin("camcfg", false);
   camPrefs.clear();
   camPrefs.end();
-  server.send(200, "application/json", "{\"ok\":true,\"restarting\":true}");
-  vTaskDelay(pdMS_TO_TICKS(500));
+  request->send(200, "application/json", "{\"ok\":true,\"restarting\":true}");
   Serial.println("[INFO] Camera setting direset, restart...");
-  ESP.restart();
+  restartAt = millis() + 400;   // restart di loop() setelah response terkirim
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -451,24 +471,24 @@ void handleCamReset() {
 // Kecerahan disimpan permanen (NVS), status on/off TIDAK (default off
 // saat boot agar tidak langsung menarik arus besar).
 // ─────────────────────────────────────────────────────────────
-void handleFlashGet() {
+void handleFlashGet(AsyncWebServerRequest* request) {
   char resp[48];
   snprintf(resp, sizeof(resp), "{\"on\":%s,\"bri\":%d}",
            flashOn ? "true" : "false", flashBri);
-  server.send(200, "application/json", resp);
+  request->send(200, "application/json", resp);
 }
 
-void handleFlashSet() {
-  if (server.hasArg("on"))  flashOn = (server.arg("on").toInt() != 0);
-  if (server.hasArg("bri")) {
-    int b = server.arg("bri").toInt();
+void handleFlashSet(AsyncWebServerRequest* request) {
+  if (request->hasParam("on"))  flashOn = (reqArg(request, "on").toInt() != 0);
+  if (request->hasParam("bri")) {
+    int b = reqArg(request, "bri").toInt();
     flashBri = b < 0 ? 0 : (b > 255 ? 255 : b);
     camPrefs.begin("camcfg", false);
     camPrefs.putUChar("flbri", flashBri);   // kecerahan persisten
     camPrefs.end();
   }
   applyFlash();
-  handleFlashGet();
+  handleFlashGet(request);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -608,7 +628,7 @@ static bool sdNameValid(const String& name) {
 // ─────────────────────────────────────────────────────────────
 // HTTP: SD info — dipolling web UI untuk counter dataset
 // ─────────────────────────────────────────────────────────────
-void handleSDInfo() {
+void handleSDInfo(AsyncWebServerRequest* request) {
   char resp[160];
   snprintf(resp, sizeof(resp),
     "{\"mounted\":%s,\"good\":%lu,\"bad\":%lu,\"used_mb\":%lu,\"total_mb\":%lu}",
@@ -616,27 +636,27 @@ void handleSDInfo() {
     (unsigned long)sdCntGood, (unsigned long)sdCntBad,
     sdMounted ? (unsigned long)(SD_MMC.usedBytes()  / (1024UL * 1024UL)) : 0,
     sdMounted ? (unsigned long)(SD_MMC.totalBytes() / (1024UL * 1024UL)) : 0);
-  server.send(200, "application/json", resp);
+  request->send(200, "application/json", resp);
 }
 
 // ─────────────────────────────────────────────────────────────
 // HTTP: capture → simpan langsung ke SD (/sd/capture?label=good)
 // ─────────────────────────────────────────────────────────────
-void handleSDCapture() {
-  if (!sdMounted)  { server.send(503, "application/json", "{\"error\":\"no_sd\"}"); return; }
-  if (classifying) { server.send(503, "application/json", "{\"error\":\"busy\"}");  return; }
+void handleSDCapture(AsyncWebServerRequest* request) {
+  if (!sdMounted)  { request->send(503, "application/json", "{\"error\":\"no_sd\"}"); return; }
+  if (classifying) { request->send(503, "application/json", "{\"error\":\"busy\"}");  return; }
 
-  String label = server.arg("label");
+  String label = reqArg(request, "label");
   if (label != "good" && label != "bad") {
-    server.send(400, "application/json", "{\"error\":\"bad_label\"}"); return;
+    request->send(400, "application/json", "{\"error\":\"bad_label\"}"); return;
   }
 
   const bool isGood = (label == "good");
   uint32_t n = sdNextIdx(isGood);   // isi celah terendah (bekas hapus)
-  if (n == 0) { server.send(507, "application/json", "{\"error\":\"dataset_full\"}"); return; }
+  if (n == 0) { request->send(507, "application/json", "{\"error\":\"dataset_full\"}"); return; }
 
   camera_fb_t* fb = esp_camera_fb_get();
-  if (!fb) { server.send(503, "application/json", "{\"error\":\"camera_failed\"}"); return; }
+  if (!fb) { request->send(503, "application/json", "{\"error\":\"camera_failed\"}"); return; }
 
   char path[48];
   snprintf(path, sizeof(path), SD_DATASET_DIR "/%s_%04lu.jpg",
@@ -645,7 +665,7 @@ void handleSDCapture() {
   File f = SD_MMC.open(path, FILE_WRITE);
   if (!f) {
     esp_camera_fb_return(fb);
-    server.send(500, "application/json", "{\"error\":\"sd_write_failed\"}");
+    request->send(500, "application/json", "{\"error\":\"sd_write_failed\"}");
     return;
   }
   size_t written = f.write(fb->buf, fb->len);
@@ -654,7 +674,7 @@ void handleSDCapture() {
 
   if (written == 0) {
     SD_MMC.remove(path);
-    server.send(500, "application/json", "{\"error\":\"sd_write_failed\"}");
+    request->send(500, "application/json", "{\"error\":\"sd_write_failed\"}");
     return;
   }
 
@@ -667,19 +687,17 @@ void handleSDCapture() {
     label.c_str(), (unsigned long)n,
     (unsigned long)sdCntGood, (unsigned long)sdCntBad,
     (unsigned long)(written / 1024));
-  server.send(200, "application/json", resp);
+  request->send(200, "application/json", resp);
 }
 
 // ─────────────────────────────────────────────────────────────
-// HTTP: daftar file dataset di SD (JSON, dikirim chunked)
+// HTTP: daftar file dataset di SD (JSON). Async: rakit ke String dulu
+// (dataset puluhan file, ukuran kecil) lalu kirim sekali.
 // ─────────────────────────────────────────────────────────────
-void handleSDList() {
-  if (!sdMounted) { server.send(503, "application/json", "{\"error\":\"no_sd\"}"); return; }
+void handleSDList(AsyncWebServerRequest* request) {
+  if (!sdMounted) { request->send(503, "application/json", "{\"error\":\"no_sd\"}"); return; }
 
-  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server.send(200, "application/json", "");
-  server.sendContent("[");
-
+  String out = "[";
   File dir = SD_MMC.open(SD_DATASET_DIR);
   File f;
   bool first = true;
@@ -690,42 +708,40 @@ void handleSDList() {
       base = base ? base + 1 : f.name();
       snprintf(item, sizeof(item), "%s{\"n\":\"%s\",\"s\":%lu}",
                first ? "" : ",", base, (unsigned long)f.size());
-      server.sendContent(item);
+      out += item;
       first = false;
     }
     f.close();
   }
   dir.close();
-  server.sendContent("]");
-  server.sendContent("");   // akhiri chunked response
+  out += "]";
+  request->send(200, "application/json", out);
 }
 
 // ─────────────────────────────────────────────────────────────
-// HTTP: stream satu file dataset dari SD (/sd/file?name=...)
+// HTTP: kirim satu file dataset dari SD (/sd/file?name=...)
+// request->send(SD_MMC, ...) = non-blocking (chunked oleh AsyncWebServer)
 // ─────────────────────────────────────────────────────────────
-void handleSDFile() {
-  if (!sdMounted) { server.send(503, "text/plain", "no sd"); return; }
-  String name = server.arg("name");
-  if (!sdNameValid(name)) { server.send(400, "text/plain", "bad name"); return; }
+void handleSDFile(AsyncWebServerRequest* request) {
+  if (!sdMounted) { request->send(503, "text/plain", "no sd"); return; }
+  String name = reqArg(request, "name");
+  if (!sdNameValid(name)) { request->send(400, "text/plain", "bad name"); return; }
 
   String path = String(SD_DATASET_DIR) + "/" + name;
-  if (!SD_MMC.exists(path)) { server.send(404, "text/plain", "not found"); return; }
-
-  File f = SD_MMC.open(path, FILE_READ);
-  server.streamFile(f, "image/jpeg");
-  f.close();
+  if (!SD_MMC.exists(path)) { request->send(404, "text/plain", "not found"); return; }
+  request->send(SD_MMC, path, "image/jpeg");
 }
 
 // ─────────────────────────────────────────────────────────────
 // HTTP: hapus satu file dataset (/sd/delete?name=...)
 // ─────────────────────────────────────────────────────────────
-void handleSDDelete() {
-  if (!sdMounted) { server.send(503, "application/json", "{\"error\":\"no_sd\"}"); return; }
-  String name = server.arg("name");
-  if (!sdNameValid(name)) { server.send(400, "application/json", "{\"error\":\"bad_name\"}"); return; }
+void handleSDDelete(AsyncWebServerRequest* request) {
+  if (!sdMounted) { request->send(503, "application/json", "{\"error\":\"no_sd\"}"); return; }
+  String name = reqArg(request, "name");
+  if (!sdNameValid(name)) { request->send(400, "application/json", "{\"error\":\"bad_name\"}"); return; }
 
   String path = String(SD_DATASET_DIR) + "/" + name;
-  if (!SD_MMC.exists(path)) { server.send(404, "application/json", "{\"error\":\"not_found\"}"); return; }
+  if (!SD_MMC.exists(path)) { request->send(404, "application/json", "{\"error\":\"not_found\"}"); return; }
 
   bool ok = SD_MMC.remove(path);
   if (ok) {
@@ -737,35 +753,35 @@ void handleSDDelete() {
       else   { if (sdCntBad)  sdCntBad--;  }
     }
   }
-  server.send(ok ? 200 : 500, "application/json",
-              ok ? "{\"ok\":true}" : "{\"error\":\"delete_failed\"}");
+  request->send(ok ? 200 : 500, "application/json",
+                ok ? "{\"ok\":true}" : "{\"error\":\"delete_failed\"}");
 }
 
 // ─────────────────────────────────────────────────────────────
 // HTTP: pindah label (/sd/relabel?name=good_0001.jpg)
 // Rename ke index berikutnya pada label lawan: good ↔ bad
 // ─────────────────────────────────────────────────────────────
-void handleSDRelabel() {
-  if (!sdMounted) { server.send(503, "application/json", "{\"error\":\"no_sd\"}"); return; }
-  String name = server.arg("name");
-  if (!sdNameValid(name)) { server.send(400, "application/json", "{\"error\":\"bad_name\"}"); return; }
+void handleSDRelabel(AsyncWebServerRequest* request) {
+  if (!sdMounted) { request->send(503, "application/json", "{\"error\":\"no_sd\"}"); return; }
+  String name = reqArg(request, "name");
+  if (!sdNameValid(name)) { request->send(400, "application/json", "{\"error\":\"bad_name\"}"); return; }
 
   bool fromGood; uint32_t oldIdx;
   if (!sdParseName(name.c_str(), &fromGood, &oldIdx)) {
-    server.send(400, "application/json", "{\"error\":\"bad_label\"}"); return;
+    request->send(400, "application/json", "{\"error\":\"bad_label\"}"); return;
   }
 
   String from = String(SD_DATASET_DIR) + "/" + name;
-  if (!SD_MMC.exists(from)) { server.send(404, "application/json", "{\"error\":\"not_found\"}"); return; }
+  if (!SD_MMC.exists(from)) { request->send(404, "application/json", "{\"error\":\"not_found\"}"); return; }
 
   uint32_t n = sdNextIdx(!fromGood);   // celah terendah di label tujuan
-  if (n == 0) { server.send(507, "application/json", "{\"error\":\"dataset_full\"}"); return; }
+  if (n == 0) { request->send(507, "application/json", "{\"error\":\"dataset_full\"}"); return; }
   char newName[32];
   snprintf(newName, sizeof(newName), "%s_%04lu.jpg",
            fromGood ? "bad" : "good", (unsigned long)n);
 
   if (!SD_MMC.rename(from, String(SD_DATASET_DIR) + "/" + newName)) {
-    server.send(500, "application/json", "{\"error\":\"rename_failed\"}"); return;
+    request->send(500, "application/json", "{\"error\":\"rename_failed\"}"); return;
   }
   sdIdxMark(fromGood,  oldIdx, false);
   sdIdxMark(!fromGood, n,      true);
@@ -776,7 +792,7 @@ void handleSDRelabel() {
   snprintf(resp, sizeof(resp),
     "{\"ok\":true,\"file\":\"%s\",\"good\":%lu,\"bad\":%lu}",
     newName, (unsigned long)sdCntGood, (unsigned long)sdCntBad);
-  server.send(200, "application/json", resp);
+  request->send(200, "application/json", resp);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -789,12 +805,12 @@ static uint32_t sdUpIdx   = 0;
 static bool     sdUpIsGood = false;
 static bool     sdUpError  = false;
 
-void handleSDUploadChunk() {
-  HTTPUpload& up = server.upload();
-  if (up.status == UPLOAD_FILE_START) {
+void onSDUploadChunk(AsyncWebServerRequest* request, const String& filename,
+                     size_t index, uint8_t* data, size_t len, bool final) {
+  if (index == 0) {
     sdUpError = false;
     sdUpName  = "";
-    String label = server.arg("label");
+    String label = reqArg(request, "label");
     if (!sdMounted || (label != "good" && label != "bad")) { sdUpError = true; return; }
 
     sdUpIsGood = (label == "good");
@@ -808,95 +824,65 @@ void handleSDUploadChunk() {
     sdUpName = String(label) + "_";
     char num[12]; snprintf(num, sizeof(num), "%04lu.jpg", (unsigned long)sdUpIdx);
     sdUpName += num;
-  } else if (up.status == UPLOAD_FILE_WRITE) {
-    if (sdUpFile && !sdUpError) sdUpFile.write(up.buf, up.currentSize);
-  } else if (up.status == UPLOAD_FILE_END) {
+  }
+  if (sdUpFile && !sdUpError && len) sdUpFile.write(data, len);
+  if (final) {
     if (sdUpFile) sdUpFile.close();
-    if (!sdUpError && up.totalSize > 0) {
+    if (!sdUpError && (index + len) > 0) {
       sdIdxMark(sdUpIsGood, sdUpIdx, true);
       if (sdUpIsGood) sdCntGood++; else sdCntBad++;
     }
-  } else if (up.status == UPLOAD_FILE_ABORTED) {
-    if (sdUpFile) sdUpFile.close();
-    sdUpError = true;
   }
 }
 
-void handleSDUploadDone() {
+void onSDUploadDone(AsyncWebServerRequest* request) {
   if (sdUpError || sdUpName.length() == 0) {
-    server.send(500, "application/json", "{\"error\":\"upload_failed\"}");
+    request->send(500, "application/json", "{\"error\":\"upload_failed\"}");
     return;
   }
   char resp[128];
   snprintf(resp, sizeof(resp),
     "{\"ok\":true,\"file\":\"%s\",\"good\":%lu,\"bad\":%lu}",
     sdUpName.c_str(), (unsigned long)sdCntGood, (unsigned long)sdCntBad);
-  server.send(200, "application/json", resp);
-}
-
-// ─────────────────────────────────────────────────────────────
-// HTTP: file statik dari LittleFS (web UI di-host di alat, tanpa CDN)
-// Satu handler generik (dipasang sebagai onNotFound) menyajikan semua
-// aset — index.html, app.js, style.css, tw.css, chart.min.js — jadi
-// menambah file UI baru tidak perlu ubah firmware.
-// ─────────────────────────────────────────────────────────────
-static const char* mimeFor(const String& p) {
-  if (p.endsWith(".html")) return "text/html";
-  if (p.endsWith(".js"))   return "application/javascript";
-  if (p.endsWith(".css"))  return "text/css";
-  if (p.endsWith(".json")) return "application/json";
-  if (p.endsWith(".svg"))  return "image/svg+xml";
-  if (p.endsWith(".png"))  return "image/png";
-  if (p.endsWith(".jpg") || p.endsWith(".jpeg")) return "image/jpeg";
-  if (p.endsWith(".ico"))  return "image/x-icon";
-  return "application/octet-stream";
-}
-
-void handleStatic() {
-  String path = server.uri();
-  if (path == "/") path = "/index.html";
-  if (path.indexOf("..") >= 0) { server.send(400, "text/plain", "bad path"); return; }
-  if (!LittleFS.exists(path)) { server.send(404, "text/plain", "Not found"); return; }
-
-  // chart.min.js = vendor besar & stabil → boleh di-cache lama browser
-  // (load berikutnya instan). File UI lain TIDAK di-cache agar perubahan
-  // langsung terlihat setelah upload ulang LittleFS.
-  if (path == "/chart.min.js") server.sendHeader("Cache-Control", "max-age=604800, immutable");
-  else                         server.sendHeader("Cache-Control", "no-cache");
-
-  File f = LittleFS.open(path, "r");
-  server.streamFile(f, mimeFor(path));
-  f.close();
+  request->send(200, "application/json", resp);
 }
 
 // ─────────────────────────────────────────────────────────────
 // HTTP: capture JPEG live — dipakai preview & download dataset
+// Async: frame disalin ke buffer (shared_ptr), dikirim non-blocking via filler.
+// shared_ptr dibebaskan otomatis saat kirim selesai ATAU client disconnect →
+// tidak ada leak. fb dikembalikan segera setelah disalin.
 // ─────────────────────────────────────────────────────────────
-// Timing capture terakhir (untuk /sys) — ungkap di mana server terblokir:
-//   grab = lama esp_camera_fb_get (Core1), send = lama kirim frame ke TCP
 volatile uint32_t capGrabMs = 0, capSendMs = 0, capLen = 0;
 
-void handleCapture() {
-  if (classifying) { server.send(503, "text/plain", "busy"); return; }
+void handleCapture(AsyncWebServerRequest* request) {
+  if (classifying) { request->send(503, "text/plain", "busy"); return; }
   uint32_t t0 = millis();
   camera_fb_t* fb = esp_camera_fb_get();
-  if (!fb) { server.send(503, "text/plain", "camera failed"); return; }
-  uint32_t t1 = millis();
-  server.sendHeader("Cache-Control", "no-cache, no-store");
-  server.sendHeader("Access-Control-Allow-Origin", "*");
-  server.setContentLength(fb->len);
-  server.send(200, "image/jpeg", "");
-  server.client().write(fb->buf, fb->len);
-  capGrabMs = t1 - t0;
-  capSendMs = millis() - t1;
-  capLen    = fb->len;
+  if (!fb) { request->send(503, "text/plain", "camera failed"); return; }
+  size_t len = fb->len;
+  std::shared_ptr<uint8_t> buf((uint8_t*)malloc(len), free);
+  if (!buf) { esp_camera_fb_return(fb); request->send(500, "text/plain", "oom"); return; }
+  memcpy(buf.get(), fb->buf, len);
   esp_camera_fb_return(fb);
+  capGrabMs = millis() - t0;
+  capLen    = len;
+
+  AsyncWebServerResponse* response = request->beginResponse("image/jpeg", len,
+    [buf, len](uint8_t* out, size_t maxLen, size_t index) -> size_t {
+      size_t rem = len - index;
+      size_t toSend = rem < maxLen ? rem : maxLen;
+      memcpy(out, buf.get() + index, toSend);
+      return toSend;
+    });
+  response->addHeader("Cache-Control", "no-cache, no-store");
+  request->send(response);
 }
 
 // ─────────────────────────────────────────────────────────────
 // HTTP: info model
 // ─────────────────────────────────────────────────────────────
-void handleModelInfo() {
+void handleModelInfo(AsyncWebServerRequest* request) {
   // Pesan error TFLite bisa mengandung kutip ganda — ganti agar JSON valid
   char err[96];
   strlcpy(err, tfliteErrReporter.last, sizeof(err));
@@ -909,7 +895,7 @@ void handleModelInfo() {
     (int)modelSizeKB,
     modelLoaded ? (int)(interpreter->arena_used_bytes() / 1024) : 0,
     err);
-  server.send(200, "application/json", resp);
+  request->send(200, "application/json", resp);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -917,7 +903,7 @@ void handleModelInfo() {
 // Untuk debug performa: lihat heap menyusut/leak, RSSI lemah, atau capture
 // (grab/send) yang lama memblokir server.
 // ─────────────────────────────────────────────────────────────
-void handleSys() {
+void handleSys(AsyncWebServerRequest* request) {
   char resp[320];
   snprintf(resp, sizeof(resp),
     "{\"heap_free\":%u,\"heap_min\":%u,\"heap_maxblk\":%u,"
@@ -929,7 +915,7 @@ void handleSys() {
     (unsigned)ESP.getFreePsram(), (unsigned)ESP.getMaxAllocPsram(),
     (int)WiFi.RSSI(), (unsigned long)(millis() / 1000),
     (unsigned)capGrabMs, (unsigned)capSendMs, (unsigned)capLen);
-  server.send(200, "application/json", resp);
+  request->send(200, "application/json", resp);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1024,17 +1010,19 @@ void inferenceTask(void* pv) {
 // ─────────────────────────────────────────────────────────────
 // HTTP: jalankan inferensi (Core 1 trigger Core 0, tunggu hasil)
 // ─────────────────────────────────────────────────────────────
-void handlePredict() {
-  if (!modelLoaded) { server.send(503, "application/json", "{\"error\":\"no_model\"}"); return; }
-  if (classifying)  { server.send(503, "application/json", "{\"error\":\"busy\"}"); return; }
+// Inferensi tetap di task Core 0 (stack 16KB, aman utk TFLite). Handler async
+// memicu lalu menunggu semaphore — ini memblokir task AsyncTCP ~80-100ms saat
+// predict (jarang, user-triggered), bukan terus-menerus → dapat diterima.
+void handlePredict(AsyncWebServerRequest* request) {
+  if (!modelLoaded) { request->send(503, "application/json", "{\"error\":\"no_model\"}"); return; }
+  if (classifying)  { request->send(503, "application/json", "{\"error\":\"busy\"}"); return; }
 
   classifying = true;
   xSemaphoreGive(inferTrigSem);  // bangunkan Core 0
 
-  // Timeout 5 detik (tidak ada warmup/switch resolusi)
   if (xSemaphoreTake(inferDoneSem, pdMS_TO_TICKS(5000)) != pdTRUE) {
     classifying = false;
-    server.send(503, "application/json", "{\"error\":\"timeout\"}");
+    request->send(503, "application/json", "{\"error\":\"timeout\"}");
     return;
   }
   classifying = false;
@@ -1042,7 +1030,7 @@ void handlePredict() {
   if (!inferResult.ok) {
     char resp[80];
     snprintf(resp, sizeof(resp), "{\"error\":\"%s\"}", inferResult.err);
-    server.send(503, "application/json", resp);
+    request->send(503, "application/json", resp);
     return;
   }
 
@@ -1052,17 +1040,31 @@ void handlePredict() {
     inferResult.good ? "BAGUS" : "TIDAK BAGUS",
     inferResult.score, (unsigned long)inferResult.time_ms,
     inferResult.good ? "true" : "false");
-  server.send(200, "application/json", resp);
+  request->send(200, "application/json", resp);
 }
 
 // ─────────────────────────────────────────────────────────────
 // HTTP: upload model .tflite → LittleFS → restart otomatis
 // ─────────────────────────────────────────────────────────────
-void handleUploadDone() {
-  if (uploadFile) uploadFile.close();
+// onUpload async: dipanggil per-chunk (index=0 awal, final=true terakhir)
+void onModelUploadChunk(AsyncWebServerRequest* request, const String& filename,
+                        size_t index, uint8_t* data, size_t len, bool final) {
+  if (index == 0) {
+    Serial.printf("[UPLOAD] Start: %s → %s\n", filename.c_str(),
+                  sdMounted ? "SD card" : "LittleFS");
+    uploadFile = modelFS().open(MODEL_PATH, "w");
+  }
+  if (uploadFile && len) uploadFile.write(data, len);
+  if (final) {
+    if (uploadFile) uploadFile.close();
+    Serial.printf("[UPLOAD] Selesai: %u bytes\n", (unsigned)(index + len));
+  }
+}
 
+// onRequest async: dipanggil setelah upload selesai → validasi + restart
+void onModelUploadDone(AsyncWebServerRequest* request) {
   if (!modelFS().exists(MODEL_PATH)) {
-    server.send(500, "application/json", "{\"ok\":false,\"error\":\"save_failed\"}");
+    request->send(500, "application/json", "{\"ok\":false,\"error\":\"save_failed\"}");
     return;
   }
   File f  = modelFS().open(MODEL_PATH, "r");
@@ -1073,32 +1075,17 @@ void handleUploadDone() {
   if (sz < MIN_MODEL_SIZE) {
     modelFS().remove(MODEL_PATH);
     Serial.printf("[UPLOAD] Ditolak: model hanya %u B (rusak)\n", (unsigned)sz);
-    server.send(400, "application/json", "{\"ok\":false,\"error\":\"model_too_small\"}");
+    request->send(400, "application/json", "{\"ok\":false,\"error\":\"model_too_small\"}");
     return;
   }
 
   char resp[96];
   snprintf(resp, sizeof(resp),
     "{\"ok\":true,\"size_kb\":%d,\"restarting\":true}", (int)(sz / 1024));
-  server.send(200, "application/json", resp);
+  request->send(200, "application/json", resp);
 
-  vTaskDelay(pdMS_TO_TICKS(800));  // beri waktu TCP kirim response
   Serial.println("[INFO] Model diupload, restart...");
-  ESP.restart();
-}
-
-void handleUploadChunk() {
-  HTTPUpload& up = server.upload();
-  if (up.status == UPLOAD_FILE_START) {
-    Serial.printf("[UPLOAD] Start: %s → %s\n", up.filename.c_str(),
-                  sdMounted ? "SD card" : "LittleFS");
-    uploadFile = modelFS().open(MODEL_PATH, "w");
-  } else if (up.status == UPLOAD_FILE_WRITE) {
-    if (uploadFile) uploadFile.write(up.buf, up.currentSize);
-  } else if (up.status == UPLOAD_FILE_END) {
-    if (uploadFile) uploadFile.close();
-    Serial.printf("[UPLOAD] Selesai: %d bytes\n", (int)up.totalSize);
-  }
+  restartAt = millis() + 800;   // restart di loop() setelah response terkirim
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1123,9 +1110,11 @@ void setup() {
   pinMode(BOOT_BTN, INPUT_PULLUP);
   neopixelWrite(RGB_LED_PIN, 0, 0, 0);
 
-  // Flash kamera: init strip + animasi awal (colorWipe merah→hijau→biru)
+  // Flash kamera: init strip + jalankan animasi boot BERULANG di task terpisah
+  // (colorWipe berputar terus selama setup, mis. saat nunggu WiFi)
   flashStrip.begin();
-  flashBootIntro();
+  bootAnimRun = true;
+  xTaskCreatePinnedToCore(bootAnimTask, "bootAnim", 2560, NULL, 1, &bootAnimHandle, 1);
   camPrefs.begin("camcfg", true);
   if (camPrefs.isKey("flbri")) flashBri = camPrefs.getUChar("flbri", flashBri);
   camPrefs.end();
@@ -1212,25 +1201,41 @@ void setup() {
   // karena alokasi WebServer cuma beberapa KB sesaat. PSRAM lebih lambat & bisa
   // perlambat stack jaringan, jadi alokasi dibiarkan di RAM internal yang cepat.
 
-  // 8. Routes HTTP — aset statik (/, *.html, *.js, *.css) lewat onNotFound
+  // 8. Routes HTTP (async)
   server.on("/capture",      HTTP_GET,  handleCapture);
   server.on("/predict",      HTTP_GET,  handlePredict);
   server.on("/model_info",   HTTP_GET,  handleModelInfo);
   server.on("/sys",          HTTP_GET,  handleSys);
-  server.on("/upload_model", HTTP_POST, handleUploadDone, handleUploadChunk);
+  // upload model: arg #2 = onRequest (selesai), arg #3 = onUpload (per-chunk)
+  server.on("/upload_model", HTTP_POST, onModelUploadDone, onModelUploadChunk);
   server.on("/sd/info",      HTTP_GET,  handleSDInfo);
   server.on("/sd/capture",   HTTP_POST, handleSDCapture);
   server.on("/sd/list",      HTTP_GET,  handleSDList);
   server.on("/sd/file",      HTTP_GET,  handleSDFile);
   server.on("/sd/delete",    HTTP_POST, handleSDDelete);
   server.on("/sd/relabel",   HTTP_POST, handleSDRelabel);
-  server.on("/sd/upload",    HTTP_POST, handleSDUploadDone, handleSDUploadChunk);
+  server.on("/sd/upload",    HTTP_POST, onSDUploadDone, onSDUploadChunk);
   server.on("/camera/get",   HTTP_GET,  handleCamGet);
   server.on("/camera/set",   HTTP_POST, handleCamSet);
   server.on("/camera/reset", HTTP_POST, handleCamReset);
   server.on("/flash/get",    HTTP_GET,  handleFlashGet);
   server.on("/flash/set",    HTTP_POST, handleFlashSet);
-  server.onNotFound(handleStatic);   // aset web UI dari LittleFS
+
+  // chart.min.js = vendor besar & stabil → cache lama browser (load berikutnya
+  // instan). File UI lain no-cache agar perubahan langsung terlihat tiap upload.
+  server.on("/chart.min.js", HTTP_GET, [](AsyncWebServerRequest* request) {
+    AsyncWebServerResponse* r = request->beginResponse(LittleFS, "/chart.min.js",
+                                                       "application/javascript");
+    r->addHeader("Cache-Control", "max-age=604800, immutable");
+    request->send(r);
+  });
+  // Aset web UI lain dari LittleFS (non-blocking, chunked oleh AsyncWebServer)
+  server.serveStatic("/", LittleFS, "/")
+        .setDefaultFile("index.html")
+        .setCacheControl("no-cache");
+  server.onNotFound([](AsyncWebServerRequest* request) {
+    request->send(404, "text/plain", "Not found");
+  });
   server.begin();
 
   Serial.println("[OK] HTTP server\n");
@@ -1247,18 +1252,28 @@ void setup() {
     sdMounted ? "SD card (/dataset)" : "Download mode (SD tidak ada)");
   Serial.println("╚══════════════════════════════════════╝\n");
 
-  // Setup selesai → kedip putih 2× sebagai tanda siap, lalu kembalikan
-  // strip ke kendali web (mati, kecerahan dari NVS), baru masuk loop().
+  // Setup selesai → hentikan animasi loop, tunggu task berhenti (agar tidak
+  // rebutan strip), lalu kedip putih 2× sebagai tanda siap, kembalikan strip
+  // ke kendali web (mati, kecerahan NVS), baru masuk loop().
+  bootAnimRun = false;
+  while (bootAnimHandle) vTaskDelay(pdMS_TO_TICKS(10));
   flashBootReady();
   applyFlash();
 }
 
 // ─────────────────────────────────────────────────────────────
-// Loop — Core 1: WebServer + LED. WiFi (re)connect ditangani stack.
+// Loop — Core 1: LED + heartbeat + restart tertunda.
+// WebServer kini ASYNC (jalan di task AsyncTCP sendiri) — TIDAK ada
+// handleClient() di loop lagi. WiFi (re)connect ditangani stack.
 // ─────────────────────────────────────────────────────────────
 void loop() {
-  server.handleClient();
   updateLED();
+
+  // Restart tertunda (di-set handler async setelah response terkirim)
+  if (restartAt && millis() > restartAt) {
+    Serial.println("[INFO] Restart...");
+    ESP.restart();
+  }
 
   // Hitung loop-rate (kalau drop drastis = ada yang memblokir/macet)
   static uint32_t loopCnt = 0, lastHb = 0;
@@ -1268,7 +1283,6 @@ void loop() {
     lastHb = millis();
     loopCnt = 0;
     // Heartbeat debug: heap (leak?), RSSI (RF lemah?), status WiFi, loop-rate.
-    // Tetap tercetak walau WiFi tak terjangkau dari LAN.
     Serial.printf("[HB] up=%lus loop=%luHz heap=%uKB min=%uKB psram=%uKB "
                   "wifi=%d RSSI=%ddBm IP=%s\n",
       (unsigned long)(millis() / 1000), (unsigned long)hz,
@@ -1278,6 +1292,5 @@ void loop() {
       WiFi.localIP().toString().c_str());
   }
 
-  delay(2);   // jangan busy-spin Core 1 — beri napas ke task sistem (WiFi/lwIP,
-              // IDLE) & turunkan konsumsi daya/panas; HTTP tetap responsif
+  delay(5);   // async server tak butuh loop cepat; beri napas ke task sistem
 }
