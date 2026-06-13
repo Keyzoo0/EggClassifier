@@ -21,13 +21,14 @@
  *   Core 0 (prio 5) — inferenceTask: TFLite Invoke
  *   Core 1 (prio 1) — loop(): WebServer.handleClient + LED + SD I/O
  *
- * PRIORITAS #1 — web lancar diakses client:
- *   - WiFi modem sleep OFF, dipasang SETELAH dapat IP (bukan saat asosiasi —
- *     mematikan power-save saat kamera aktif bisa gagalkan koneksi). Terukur
- *     ping 167 ms avg → ~5 ms setelah OFF
- *   - Reconnect pakai auto bawaan stack (teruji), mDNS diumumkan ulang tiap IP
- *   - WebServer sinkron hanya melayani SATU koneksi pada satu waktu —
- *     web UI (app.js) mengantre semua request agar tidak saling menahan
+ * PRIORITAS #1 — web bisa diakses client (REACHABILITY, bukan kecepatan):
+ *   - WiFi power-save DEFAULT (modem sleep ON) → arus lebih rendah; mematikannya
+ *     bikin brownout pada catu USB pas-pasan → paket IP hilang (device connect
+ *     tapi tak terjangkau). Gejala utama: associate OK tapi ping/TCP 100% loss.
+ *     → Akar paling sering = DAYA. Pakai catu 5V kuat + kabel bagus.
+ *   - loop() tidak busy-spin (delay 2ms) agar task WiFi/lwIP dapat CPU
+ *   - Reconnect pakai auto bawaan stack, mDNS diumumkan ulang tiap dapat IP
+ *   - WebServer sinkron 1 koneksi → web UI (app.js) mengantre request
  *   - Model dimuat sebelum kamera agar buffer model dapat PSRAM tak terfragmentasi
  *
  * PSRAM layout (~1.4 MB dari 8 MB tersedia):
@@ -1050,17 +1051,14 @@ void setup() {
   );
   Serial.println("[OK] Inference task → Core 0 (prio 5)");
 
-  // 7. WiFi — prioritas #1: web lancar diakses client
-  //    setSleep(false) dipasang SETELAH dapat IP (di event GOT_IP), BUKAN saat
-  //    asosiasi: mematikan power-save saat kamera aktif menarik arus bisa bikin
-  //    lonjakan daya yang menggagalkan koneksi. Reconnect pakai auto bawaan
-  //    stack (teruji, ada backoff) — tidak perlu logika manual.
+  // 7. WiFi — biarkan power-save DEFAULT (modem sleep ON). Mematikannya bikin
+  //    radio full-power terus + lonjakan arus saat kamera aktif → pada catu USB
+  //    yang pas-pasan, brownout → paket IP hilang (device "connect" tapi tak
+  //    bisa dijangkau). Reconnect pakai auto bawaan stack.
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
   WiFi.onEvent([](WiFiEvent_t event) {
     if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
-      WiFi.setSleep(false);   // modem sleep OFF setelah terhubung → request HTTP
-                              // tidak tertahan menunggu radio bangun (±150ms)
       Serial.printf("[WiFi] IP: %s\n", WiFi.localIP().toString().c_str());
       // IP DHCP bisa berubah antar boot — umumkan ulang telur.local
       MDNS.end();
@@ -1120,4 +1118,6 @@ void setup() {
 void loop() {
   server.handleClient();
   updateLED();
+  delay(2);   // jangan busy-spin Core 1 — beri napas ke task sistem (WiFi/lwIP,
+              // IDLE) & turunkan konsumsi daya/panas; HTTP tetap responsif
 }
