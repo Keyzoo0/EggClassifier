@@ -114,10 +114,12 @@
 #define ARENA_SIZE (200 * 1024)   // 200 KB dari PSRAM
 
 // ── Kamera & Inferensi ────────────────────────────────────────
-// Camera selalu VGA; tidak pernah ganti resolusi saat inferensi.
-// Frame VGA di-scale nearest-neighbor → 96×96 di PSRAM buffer.
-#define RGB_MAX_W  640
-#define RGB_MAX_H  480
+// Camera QVGA (320×240) — model hanya 96×96, jadi VGA = pemborosan murni:
+// frame JPEG VGA ~35KB memblokir server sinkron lama saat dikirim, dan butuh
+// rgbArena 900KB. QVGA: frame ~10KB (preview gesit, server tak lama terblokir),
+// rgbArena 230KB, decode lebih cepat. Tetap di-scale nearest-neighbor → 96×96.
+#define RGB_MAX_W  320
+#define RGB_MAX_H  240
 #define CROP_SZ     96
 
 // ── Global ────────────────────────────────────────────────────
@@ -298,9 +300,8 @@ bool initCamera() {
   cfg.xclk_freq_hz = 20000000;
   cfg.pixel_format = PIXFORMAT_JPEG;
   cfg.grab_mode    = CAMERA_GRAB_LATEST;  // selalu ambil frame terbaru
-  cfg.frame_size   = FRAMESIZE_VGA;       // 640×480, tidak pernah berubah
-  cfg.jpeg_quality = 10;  // 0=terbaik; q10 cukup utk training 96×96 dan
-                          // frame ±40% lebih kecil dari q6 → preview gesit
+  cfg.frame_size   = FRAMESIZE_QVGA;      // 320×240 — cukup utk model 96×96
+  cfg.jpeg_quality = 12;  // 0=terbaik; q12 di QVGA → frame ~8-10KB (preview gesit)
   cfg.fb_count     = 2;                   // double-buffer di PSRAM
   cfg.fb_location  = CAMERA_FB_IN_PSRAM;
 
@@ -314,7 +315,7 @@ bool initCamera() {
     s->set_contrast(s, 1);
     s->set_awb_gain(s, 1);
   }
-  Serial.println("[OK] Camera: VGA 640×480 JPEG double-buffer PSRAM");
+  Serial.println("[OK] Camera: QVGA 320×240 JPEG double-buffer PSRAM");
   return true;
 }
 
@@ -871,15 +872,24 @@ void handleStatic() {
 // ─────────────────────────────────────────────────────────────
 // HTTP: capture JPEG live — dipakai preview & download dataset
 // ─────────────────────────────────────────────────────────────
+// Timing capture terakhir (untuk /sys) — ungkap di mana server terblokir:
+//   grab = lama esp_camera_fb_get (Core1), send = lama kirim frame ke TCP
+volatile uint32_t capGrabMs = 0, capSendMs = 0, capLen = 0;
+
 void handleCapture() {
   if (classifying) { server.send(503, "text/plain", "busy"); return; }
+  uint32_t t0 = millis();
   camera_fb_t* fb = esp_camera_fb_get();
   if (!fb) { server.send(503, "text/plain", "camera failed"); return; }
+  uint32_t t1 = millis();
   server.sendHeader("Cache-Control", "no-cache, no-store");
   server.sendHeader("Access-Control-Allow-Origin", "*");
   server.setContentLength(fb->len);
   server.send(200, "image/jpeg", "");
   server.client().write(fb->buf, fb->len);
+  capGrabMs = t1 - t0;
+  capSendMs = millis() - t1;
+  capLen    = fb->len;
   esp_camera_fb_return(fb);
 }
 
@@ -899,6 +909,26 @@ void handleModelInfo() {
     (int)modelSizeKB,
     modelLoaded ? (int)(interpreter->arena_used_bytes() / 1024) : 0,
     err);
+  server.send(200, "application/json", resp);
+}
+
+// ─────────────────────────────────────────────────────────────
+// HTTP: diagnostik sistem — RAM, PSRAM, RSSI, uptime, timing capture
+// Untuk debug performa: lihat heap menyusut/leak, RSSI lemah, atau capture
+// (grab/send) yang lama memblokir server.
+// ─────────────────────────────────────────────────────────────
+void handleSys() {
+  char resp[320];
+  snprintf(resp, sizeof(resp),
+    "{\"heap_free\":%u,\"heap_min\":%u,\"heap_maxblk\":%u,"
+    "\"psram_free\":%u,\"psram_maxblk\":%u,"
+    "\"rssi\":%d,\"uptime_s\":%lu,"
+    "\"cap_grab_ms\":%u,\"cap_send_ms\":%u,\"cap_len\":%u}",
+    (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMinFreeHeap(),
+    (unsigned)ESP.getMaxAllocHeap(),
+    (unsigned)ESP.getFreePsram(), (unsigned)ESP.getMaxAllocPsram(),
+    (int)WiFi.RSSI(), (unsigned long)(millis() / 1000),
+    (unsigned)capGrabMs, (unsigned)capSendMs, (unsigned)capLen);
   server.send(200, "application/json", resp);
 }
 
@@ -1181,6 +1211,7 @@ void setup() {
   server.on("/capture",      HTTP_GET,  handleCapture);
   server.on("/predict",      HTTP_GET,  handlePredict);
   server.on("/model_info",   HTTP_GET,  handleModelInfo);
+  server.on("/sys",          HTTP_GET,  handleSys);
   server.on("/upload_model", HTTP_POST, handleUploadDone, handleUploadChunk);
   server.on("/sd/info",      HTTP_GET,  handleSDInfo);
   server.on("/sd/capture",   HTTP_POST, handleSDCapture);
@@ -1223,6 +1254,25 @@ void setup() {
 void loop() {
   server.handleClient();
   updateLED();
+
+  // Hitung loop-rate (kalau drop drastis = ada yang memblokir/macet)
+  static uint32_t loopCnt = 0, lastHb = 0;
+  loopCnt++;
+  if (millis() - lastHb >= 3000) {
+    uint32_t hz = loopCnt * 1000 / (millis() - lastHb);
+    lastHb = millis();
+    loopCnt = 0;
+    // Heartbeat debug: heap (leak?), RSSI (RF lemah?), status WiFi, loop-rate.
+    // Tetap tercetak walau WiFi tak terjangkau dari LAN.
+    Serial.printf("[HB] up=%lus loop=%luHz heap=%uKB min=%uKB psram=%uKB "
+                  "wifi=%d RSSI=%ddBm IP=%s\n",
+      (unsigned long)(millis() / 1000), (unsigned long)hz,
+      (unsigned)(ESP.getFreeHeap() / 1024), (unsigned)(ESP.getMinFreeHeap() / 1024),
+      (unsigned)(ESP.getFreePsram() / 1024),
+      (int)WiFi.status(), (int)WiFi.RSSI(),
+      WiFi.localIP().toString().c_str());
+  }
+
   delay(2);   // jangan busy-spin Core 1 — beri napas ke task sistem (WiFi/lwIP,
               // IDLE) & turunkan konsumsi daya/panas; HTTP tetap responsif
 }
