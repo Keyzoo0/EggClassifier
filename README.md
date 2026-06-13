@@ -22,9 +22,9 @@ Sistem klasifikasi telur **on-device** yang mendeteksi kualitas cangkang telur (
 
 | Komponen | Spesifikasi |
 |---|---|
-| Board | Freenove ESP32-S3-WROOM CAM (FNK0085, varian N16R8) |
+| Board | Freenove ESP32-S3-WROOM CAM (FNK0085) |
 | MCU | ESP32-S3 Dual-Core Xtensa LX7 @ 240 MHz |
-| Flash | 16 MB (terdeteksi esptool) |
+| Flash | 8 MB |
 | PSRAM | 8 MB Octal (OPI) |
 | Kamera | OV2640 2MP FOV 66.5° (onboard, selalu berdaya — tanpa AXP) |
 | Penyimpanan | microSD 4 GB, FAT32 (allocation unit 16K), SDMMC 1-bit |
@@ -116,19 +116,11 @@ klasifikasiTelur_ESP32_S3_CAM/
 │   └── dataset/                         # Foto telur lokal (tidak di-track)
 └── EggClassifierV2/                   # ← Firmware utama
     ├── EggClassifierV2.ino
-    └── data/                          # LittleFS — web interface (di-host di alat, TANPA CDN)
+    └── data/                          # LittleFS — web interface
         ├── index.html
         ├── app.js
-        ├── style.css
-        ├── tw.css                     # Tailwind purged ~8KB (ganti Play CDN 400KB+JIT)
-        └── chart.min.js              # Chart.js lokal — lazy-load saat tab Prediksi
+        └── style.css
 ```
-
-> **Web tampil cepat tanpa internet:** semua aset (CSS, JS, font) di-host di
-> LittleFS, bukan dari CDN. Tailwind dipakai sebagai build purged (`tw.css`),
-> bukan Play CDN yang berat. Regenerasi `tw.css` bila menambah class Tailwind baru:
-> jalankan `EggClassifierV2/web-build/build.sh` (scan index.html + app.js → `data/tw.css`).
-> Chart.js di-lazy-load hanya saat tab Prediksi.
 
 ---
 
@@ -147,8 +139,8 @@ klasifikasiTelur_ESP32_S3_CAM/
 | Pengaturan | Nilai |
 |---|---|
 | Board | `ESP32S3 Dev Module` |
-| Flash Size | `16MB (128Mb)` |
-| **Partition Scheme** | **`Huge APP (3MB No OTA/1MB SPIFFS)`** ← wajib |
+| Flash Size | `8MB (64Mb)` ← Freenove = 8MB, bukan 16MB |
+| **Partition Scheme** | **`8M with spiffs (3MB APP/1.5MB SPIFFS)`** ← wajib |
 | PSRAM | `OPI PSRAM` |
 | CPU Frequency | `240MHz` |
 | USB CDC On Boot | `Enabled` |
@@ -182,16 +174,12 @@ http://telur.local       ← via mDNS (Windows perlu Bonjour)
 http://<IP_ADDRESS>      ← IP tampil di Serial Monitor
 ```
 
-### 7. Pasang Model
+### 7. Upload Model
 
-Model dipasang dari tab **🚀 Training** (satu pintu):
-jalankan pipeline penuh, atau klik **"Pasang Model Ini ke Alat"** pada kartu
-Model Terakhir di GitHub. Board restart otomatis dan model tersimpan di **SD card**
-(fallback LittleFS bila SD tidak terpasang) — tahan terhadap upload ulang LittleFS
-yang menimpa seluruh partisi web.
-
-> Untuk model dari luar pipeline (mis. hasil Colab), gunakan endpoint langsung:
-> `curl -F "model=@egg_model.tflite" http://telur.local/upload_model`
+1. Jalankan training di Google Colab → download `egg_model.tflite`
+2. Di web interface → tab **Prediksi** → bagian **Model TFLite**
+3. Pilih file `egg_model.tflite` → klik **Upload & Aktifkan Model**
+4. Board restart otomatis, model tersimpan permanen di flash
 
 ---
 
@@ -225,9 +213,6 @@ Saat sinkron training berikutnya, perubahan ikut diterapkan ke repo GitHub —
 foto yang dihapus di SD juga dihapus dari repo (SD = sumber kebenaran).
 
 ### Tab Training — Pipeline Otomatis (`3`)
-
-Preview kamera dimatikan di tab ini; sebagai gantinya tampil ringkasan dataset
-(jumlah foto BAGUS / CACAT + pemakaian SD).
 
 Satu tombol **"Sinkron + Training + Pasang Model"** menjalankan seluruh pipeline:
 
@@ -304,7 +289,7 @@ lalu otomatis dipasang ke alat. Progres bisa dipantau di tab Actions GitHub.
 ### Cara 2 — Manual via Google Colab
 
 Buka notebook [`training/KlasifikasiTelur_Training.ipynb`](training/KlasifikasiTelur_Training.ipynb) di Google Colab,
-lalu pasang model hasilnya via `curl -F "model=@egg_model.tflite" http://telur.local/upload_model`.
+lalu upload model hasilnya lewat tab Prediksi.
 
 ### Pipeline Training (kedua cara sama)
 

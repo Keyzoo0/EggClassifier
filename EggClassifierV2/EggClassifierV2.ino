@@ -1,6 +1,6 @@
 /*
  * EggClassifier V2 — Firmware Terpadu (RTOS + PSRAM Optimized)
- * Board  : Freenove ESP32-S3-WROOM CAM (FNK0085, N16R8) + microSD 4GB
+ * Board  : Freenove ESP32-S3-WROOM CAM (FNK0085, N8R8) + microSD
  *
  * Library (Tools → Manage Libraries):
  *   1. TensorFlowLite_ESP32 (by tanakamasayuki)
@@ -8,8 +8,8 @@
  *
  * Board Settings (Tools):
  *   Board            : ESP32S3 Dev Module
- *   Flash Size       : 16MB (128Mb)   ← board ini varian N16R8 (esptool detect 16MB)
- *   Partition Scheme : Huge APP (3MB No OTA/1MB SPIFFS)
+ *   Flash Size       : 8MB (64Mb)                        ← Freenove = 8MB!
+ *   Partition Scheme : 8M with spiffs (3MB APP/1.5MB SPIFFS)
  *   PSRAM            : OPI PSRAM
  *   CPU Frequency    : 240MHz
  *   USB CDC On Boot  : Enabled
@@ -21,16 +21,6 @@
  *   Core 0 (prio 5) — inferenceTask: TFLite Invoke
  *   Core 1 (prio 1) — loop(): WebServer.handleClient + LED + SD I/O
  *
- * PRIORITAS #1 — web bisa diakses client (REACHABILITY, bukan kecepatan):
- *   - WiFi power-save DEFAULT (modem sleep ON) → arus lebih rendah; mematikannya
- *     bikin brownout pada catu USB pas-pasan → paket IP hilang (device connect
- *     tapi tak terjangkau). Gejala utama: associate OK tapi ping/TCP 100% loss.
- *     → Akar paling sering = DAYA. Pakai catu 5V kuat + kabel bagus.
- *   - loop() tidak busy-spin (delay 2ms) agar task WiFi/lwIP dapat CPU
- *   - Reconnect pakai auto bawaan stack, mDNS diumumkan ulang tiap dapat IP
- *   - WebServer sinkron 1 koneksi → web UI (app.js) mengantre request
- *   - Model dimuat sebelum kamera agar buffer model dapat PSRAM tak terfragmentasi
- *
  * PSRAM layout (~1.4 MB dari 8 MB tersedia):
  *   rgbArena    640×480×3 = 921 KB  — decode JPEG→RGB888 (pre-alokasi)
  *   tensorArena 200 KB              — TFLite working area
@@ -40,8 +30,8 @@
  *   GET  /              → Web UI (LittleFS)
  *   GET  /capture       → JPEG frame live (preview & download dataset)
  *   GET  /predict       → inference → JSON hasil
- *   GET  /model_info    → JSON: {loaded, size_kb, arena_kb, err}
- *   POST /upload_model  → .tflite → SD card (fallback LittleFS) → restart
+ *   GET  /model_info    → JSON: {loaded, size_kb, arena_kb}
+ *   POST /upload_model  → .tflite → LittleFS → restart
  *   GET  /sd/info       → JSON: {mounted, good, bad, used_mb, total_mb}
  *   POST /sd/capture    → ?label=good|bad → simpan JPEG ke SD
  *   GET  /sd/list       → JSON daftar file dataset di SD
@@ -118,54 +108,13 @@ WebServer server(80);
 
 // SD card state
 bool     sdMounted = false;
-uint32_t sdCntGood = 0;   // jumlah file AKTUAL per label (bukan max index)
+uint32_t sdCntGood = 0;   // index file terakhir per label
 uint32_t sdCntBad  = 0;
-
-// Bitmap index terpakai per label — file baru mengisi celah index
-// terendah (bekas hapus dipakai ulang), bukan lanjut dari max.
-#define SD_MAX_IDX 9999
-static uint8_t sdGoodMap[(SD_MAX_IDX / 8) + 1];
-static uint8_t sdBadMap [(SD_MAX_IDX / 8) + 1];
-
-static inline void sdIdxMark(bool good, uint32_t n, bool used) {
-  if (n < 1 || n > SD_MAX_IDX) return;
-  uint8_t* m = good ? sdGoodMap : sdBadMap;
-  if (used) m[n >> 3] |=  (1 << (n & 7));
-  else      m[n >> 3] &= ~(1 << (n & 7));
-}
-static inline bool sdIdxUsed(bool good, uint32_t n) {
-  const uint8_t* m = good ? sdGoodMap : sdBadMap;
-  return m[n >> 3] & (1 << (n & 7));
-}
-static uint32_t sdNextIdx(bool good) {   // index kosong terendah, 0 = penuh
-  for (uint32_t n = 1; n <= SD_MAX_IDX; n++)
-    if (!sdIdxUsed(good, n)) return n;
-  return 0;
-}
-// Parse "good_0012.jpg" → label + index
-static bool sdParseName(const char* base, bool* isGood, uint32_t* idx) {
-  unsigned long n = 0;
-  if (sscanf(base, "good_%lu", &n) == 1) { *isGood = true;  *idx = n; return true; }
-  if (sscanf(base, "bad_%lu",  &n) == 1) { *isGood = false; *idx = n; return true; }
-  return false;
-}
 
 // TFLite
 static uint8_t*                           tensorArena = nullptr;
-static tflite::MicroMutableOpResolver<12> resolver;
-
-// Error reporter yang menyimpan pesan terakhir — alasan gagal load
-// model (mis. op tidak terdaftar) bisa dilihat di web via /model_info
-class BufErrorReporter : public tflite::ErrorReporter {
- public:
-  char last[96] = "";
-  int Report(const char* format, va_list args) override {
-    vsnprintf(last, sizeof(last), format, args);
-    Serial.printf("[TF] %s\n", last);
-    return 0;
-  }
-};
-static BufErrorReporter tfliteErrReporter;
+static tflite::MicroMutableOpResolver<10> resolver;
+static tflite::MicroErrorReporter        tfliteErrReporter;
 static tflite::MicroInterpreter*          interpreter = nullptr;
 static TfLiteTensor*                      inTensor    = nullptr;
 static TfLiteTensor*                      outTensor   = nullptr;
@@ -242,8 +191,7 @@ bool initCamera() {
   cfg.pixel_format = PIXFORMAT_JPEG;
   cfg.grab_mode    = CAMERA_GRAB_LATEST;  // selalu ambil frame terbaru
   cfg.frame_size   = FRAMESIZE_VGA;       // 640×480, tidak pernah berubah
-  cfg.jpeg_quality = 10;  // 0=terbaik; q10 cukup utk training 96×96 dan
-                          // frame ±40% lebih kecil dari q6 → preview gesit
+  cfg.jpeg_quality = 6;
   cfg.fb_count     = 2;                   // double-buffer di PSRAM
   cfg.fb_location  = CAMERA_FB_IN_PSRAM;
 
@@ -387,76 +335,32 @@ void handleCamReset() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// TFLite: load model → PSRAM
-// Model disimpan di SD card (tahan terhadap upload ulang LittleFS
-// yang menimpa seluruh partisi); LittleFS hanya fallback tanpa SD.
+// TFLite: load model dari LittleFS → PSRAM
 // ─────────────────────────────────────────────────────────────
-#define MODEL_PATH "/egg_model.tflite"
-#define MIN_MODEL_SIZE 1024   // file < 1KB pasti bukan .tflite valid (mis. 0 byte
-                              //   sisa deploy gagal) — jangan dicoba dimuat
-static fs::FS& modelFS() { return sdMounted ? (fs::FS&)SD_MMC : (fs::FS&)LittleFS; }
-
-// Buka model dari satu FS hanya bila ukurannya wajar (bukan kosong/rusak)
-static File openValidModel(fs::FS& fs, const char* label) {
-  File f;
-  if (!fs.exists(MODEL_PATH)) return f;
-  f = fs.open(MODEL_PATH, "r");
-  if (f && f.size() >= MIN_MODEL_SIZE) {
-    Serial.printf("[TF] Model dari %s (%u KB)\n", label, (unsigned)(f.size() / 1024));
-    return f;
-  }
-  Serial.printf("[TF] Model di %s kosong/rusak (%u B) — dilewati\n",
-                label, (unsigned)(f ? f.size() : 0));
-  if (f) f.close();
-  return File();
-}
-
 bool initTFLite() {
-  // SD dulu (sumber utama), jatuh ke LittleFS bila SD kosong/rusak/tak ada.
-  // File 0-byte di SD tidak lagi menutupi model valid di LittleFS.
-  File f;
-  if (sdMounted) f = openValidModel(SD_MMC, "SD card");
-  if (!f)        f = openValidModel(LittleFS, "LittleFS");
-  if (!f) {
-    Serial.println("[TF] Tidak ada model valid (SD/LittleFS) — pasang via tab Training");
-    snprintf(tfliteErrReporter.last, sizeof(tfliteErrReporter.last),
-             "model belum dipasang / file kosong");
+  if (!LittleFS.exists("/egg_model.tflite")) {
+    Serial.println("[TF] Tidak ada model di LittleFS");
     return false;
   }
+
+  File f  = LittleFS.open("/egg_model.tflite", "r");
   size_t sz = f.size();
   modelSizeKB = sz / 1024;
 
   uint8_t* buf = (uint8_t*) ps_malloc(sz);
-  if (!buf) {
-    f.close();
-    // Ungkap penyebab: kalau 'minta' wajar (~315KB) tapi 'alloc-maks' kecil →
-    // PSRAM terfragmentasi (load model setelah kamera). Kalau 'minta' raksasa →
-    // file model di SD rusak/ukuran salah.
-    snprintf(tfliteErrReporter.last, sizeof(tfliteErrReporter.last),
-             "ps_malloc %uKB gagal (PSRAM bebas %uKB, blok-maks %uKB)",
-             (unsigned)(sz / 1024), (unsigned)(ESP.getFreePsram() / 1024),
-             (unsigned)(ESP.getMaxAllocPsram() / 1024));
-    Serial.printf("[TF] %s\n", tfliteErrReporter.last);
-    return false;
-  }
+  if (!buf) { f.close(); Serial.println("[TF] ps_malloc model gagal"); return false; }
   f.read(buf, sz);
   f.close();
 
   const tflite::Model* model = tflite::GetModel(buf);
   if (model->version() != TFLITE_SCHEMA_VERSION) {
-    snprintf(tfliteErrReporter.last, sizeof(tfliteErrReporter.last),
-             "schema v%d != v%d", (int)model->version(), TFLITE_SCHEMA_VERSION);
-    Serial.printf("[TF] %s\n", tfliteErrReporter.last);
+    Serial.println("[TF] Schema version mismatch");
     free(buf); return false;
   }
 
   if (!tensorArena) {
     tensorArena = (uint8_t*) ps_malloc(ARENA_SIZE);
-    if (!tensorArena) {
-      snprintf(tfliteErrReporter.last, sizeof(tfliteErrReporter.last),
-               "ps_malloc arena gagal");
-      free(buf); Serial.println("[TF] ps_malloc arena gagal"); return false;
-    }
+    if (!tensorArena) { free(buf); Serial.println("[TF] ps_malloc arena gagal"); return false; }
   }
   memset(tensorArena, 0, ARENA_SIZE);
 
@@ -466,11 +370,9 @@ bool initTFLite() {
   interpreter = &interp;
 
   if (interpreter->AllocateTensors() != kTfLiteOk) {
-    // Detail (mis. op tidak terdaftar) sudah tertangkap di errReporter.last
-    Serial.println("[TF] AllocateTensors gagal — cek op resolver / ARENA_SIZE");
+    Serial.println("[TF] AllocateTensors gagal — coba perbesar ARENA_SIZE");
     return false;
   }
-  tfliteErrReporter.last[0] = '\0';   // sukses — bersihkan error lama
 
   inTensor  = interpreter->input(0);
   outTensor = interpreter->output(0);
@@ -494,17 +396,15 @@ bool initSD() {
   }
   if (!SD_MMC.exists(SD_DATASET_DIR)) SD_MMC.mkdir(SD_DATASET_DIR);
 
-  // Scan dataset: hitung file aktual per label + tandai index terpakai
+  // Scan index terakhir tiap label (format: good_0001.jpg / bad_0001.jpg)
   File dir = SD_MMC.open(SD_DATASET_DIR);
   File f;
   while ((f = dir.openNextFile())) {
     const char* base = strrchr(f.name(), '/');
     base = base ? base + 1 : f.name();
-    bool g; uint32_t n;
-    if (!f.isDirectory() && sdParseName(base, &g, &n)) {
-      sdIdxMark(g, n, true);
-      if (g) sdCntGood++; else sdCntBad++;
-    }
+    unsigned long n = 0;
+    if      (sscanf(base, "good_%lu", &n) == 1) { if (n > sdCntGood) sdCntGood = n; }
+    else if (sscanf(base, "bad_%lu",  &n) == 1) { if (n > sdCntBad)  sdCntBad  = n; }
     f.close();
   }
   dir.close();
@@ -546,13 +446,10 @@ void handleSDCapture() {
     server.send(400, "application/json", "{\"error\":\"bad_label\"}"); return;
   }
 
-  const bool isGood = (label == "good");
-  uint32_t n = sdNextIdx(isGood);   // isi celah terendah (bekas hapus)
-  if (n == 0) { server.send(507, "application/json", "{\"error\":\"dataset_full\"}"); return; }
-
   camera_fb_t* fb = esp_camera_fb_get();
   if (!fb) { server.send(503, "application/json", "{\"error\":\"camera_failed\"}"); return; }
 
+  uint32_t n = (label == "good") ? sdCntGood + 1 : sdCntBad + 1;
   char path[48];
   snprintf(path, sizeof(path), SD_DATASET_DIR "/%s_%04lu.jpg",
            label.c_str(), (unsigned long)n);
@@ -573,8 +470,7 @@ void handleSDCapture() {
     return;
   }
 
-  sdIdxMark(isGood, n, true);
-  if (isGood) sdCntGood++; else sdCntBad++;
+  if (label == "good") sdCntGood = n; else sdCntBad = n;
 
   char resp[160];
   snprintf(resp, sizeof(resp),
@@ -643,15 +539,6 @@ void handleSDDelete() {
   if (!SD_MMC.exists(path)) { server.send(404, "application/json", "{\"error\":\"not_found\"}"); return; }
 
   bool ok = SD_MMC.remove(path);
-  if (ok) {
-    // Bebaskan index agar bisa dipakai capture berikutnya + koreksi jumlah
-    bool g; uint32_t idx;
-    if (sdParseName(name.c_str(), &g, &idx)) {
-      sdIdxMark(g, idx, false);
-      if (g) { if (sdCntGood) sdCntGood--; }
-      else   { if (sdCntBad)  sdCntBad--;  }
-    }
-  }
   server.send(ok ? 200 : 500, "application/json",
               ok ? "{\"ok\":true}" : "{\"error\":\"delete_failed\"}");
 }
@@ -665,16 +552,15 @@ void handleSDRelabel() {
   String name = server.arg("name");
   if (!sdNameValid(name)) { server.send(400, "application/json", "{\"error\":\"bad_name\"}"); return; }
 
-  bool fromGood; uint32_t oldIdx;
-  if (!sdParseName(name.c_str(), &fromGood, &oldIdx)) {
+  bool fromGood = name.startsWith("good_");
+  if (!fromGood && !name.startsWith("bad_")) {
     server.send(400, "application/json", "{\"error\":\"bad_label\"}"); return;
   }
 
   String from = String(SD_DATASET_DIR) + "/" + name;
   if (!SD_MMC.exists(from)) { server.send(404, "application/json", "{\"error\":\"not_found\"}"); return; }
 
-  uint32_t n = sdNextIdx(!fromGood);   // celah terendah di label tujuan
-  if (n == 0) { server.send(507, "application/json", "{\"error\":\"dataset_full\"}"); return; }
+  uint32_t n = fromGood ? sdCntBad + 1 : sdCntGood + 1;
   char newName[32];
   snprintf(newName, sizeof(newName), "%s_%04lu.jpg",
            fromGood ? "bad" : "good", (unsigned long)n);
@@ -682,10 +568,7 @@ void handleSDRelabel() {
   if (!SD_MMC.rename(from, String(SD_DATASET_DIR) + "/" + newName)) {
     server.send(500, "application/json", "{\"error\":\"rename_failed\"}"); return;
   }
-  sdIdxMark(fromGood,  oldIdx, false);
-  sdIdxMark(!fromGood, n,      true);
-  if (fromGood) { if (sdCntGood) sdCntGood--; sdCntBad++; }
-  else          { if (sdCntBad)  sdCntBad--;  sdCntGood++; }
+  if (fromGood) sdCntBad = n; else sdCntGood = n;
 
   char resp[128];
   snprintf(resp, sizeof(resp),
@@ -713,8 +596,7 @@ void handleSDUploadChunk() {
     if (!sdMounted || (label != "good" && label != "bad")) { sdUpError = true; return; }
 
     sdUpIsGood = (label == "good");
-    sdUpIdx    = sdNextIdx(sdUpIsGood);   // isi celah terendah
-    if (sdUpIdx == 0) { sdUpError = true; return; }
+    sdUpIdx    = (sdUpIsGood ? sdCntGood : sdCntBad) + 1;
     char path[48];
     snprintf(path, sizeof(path), SD_DATASET_DIR "/%s_%04lu.jpg",
              label.c_str(), (unsigned long)sdUpIdx);
@@ -728,8 +610,7 @@ void handleSDUploadChunk() {
   } else if (up.status == UPLOAD_FILE_END) {
     if (sdUpFile) sdUpFile.close();
     if (!sdUpError && up.totalSize > 0) {
-      sdIdxMark(sdUpIsGood, sdUpIdx, true);
-      if (sdUpIsGood) sdCntGood++; else sdCntBad++;
+      if (sdUpIsGood) sdCntGood = sdUpIdx; else sdCntBad = sdUpIdx;
     }
   } else if (up.status == UPLOAD_FILE_ABORTED) {
     if (sdUpFile) sdUpFile.close();
@@ -750,39 +631,17 @@ void handleSDUploadDone() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// HTTP: file statik dari LittleFS (web UI di-host di alat, tanpa CDN)
-// Satu handler generik (dipasang sebagai onNotFound) menyajikan semua
-// aset — index.html, app.js, style.css, tw.css, chart.min.js — jadi
-// menambah file UI baru tidak perlu ubah firmware.
+// HTTP: file dari LittleFS
 // ─────────────────────────────────────────────────────────────
-static const char* mimeFor(const String& p) {
-  if (p.endsWith(".html")) return "text/html";
-  if (p.endsWith(".js"))   return "application/javascript";
-  if (p.endsWith(".css"))  return "text/css";
-  if (p.endsWith(".json")) return "application/json";
-  if (p.endsWith(".svg"))  return "image/svg+xml";
-  if (p.endsWith(".png"))  return "image/png";
-  if (p.endsWith(".jpg") || p.endsWith(".jpeg")) return "image/jpeg";
-  if (p.endsWith(".ico"))  return "image/x-icon";
-  return "application/octet-stream";
-}
-
-void handleStatic() {
-  String path = server.uri();
-  if (path == "/") path = "/index.html";
-  if (path.indexOf("..") >= 0) { server.send(400, "text/plain", "bad path"); return; }
+void serveFile(const char* path, const char* mime) {
   if (!LittleFS.exists(path)) { server.send(404, "text/plain", "Not found"); return; }
-
-  // chart.min.js = vendor besar & stabil → boleh di-cache lama browser
-  // (load berikutnya instan). File UI lain TIDAK di-cache agar perubahan
-  // langsung terlihat setelah upload ulang LittleFS.
-  if (path == "/chart.min.js") server.sendHeader("Cache-Control", "max-age=604800, immutable");
-  else                         server.sendHeader("Cache-Control", "no-cache");
-
   File f = LittleFS.open(path, "r");
-  server.streamFile(f, mimeFor(path));
+  server.streamFile(f, mime);
   f.close();
 }
+void handleRoot()  { serveFile("/index.html", "text/html"); }
+void handleAppJS() { serveFile("/app.js",     "application/javascript"); }
+void handleCSS()   { serveFile("/style.css",  "text/css"); }
 
 // ─────────────────────────────────────────────────────────────
 // HTTP: capture JPEG live — dipakai preview & download dataset
@@ -803,18 +662,12 @@ void handleCapture() {
 // HTTP: info model
 // ─────────────────────────────────────────────────────────────
 void handleModelInfo() {
-  // Pesan error TFLite bisa mengandung kutip ganda — ganti agar JSON valid
-  char err[96];
-  strlcpy(err, tfliteErrReporter.last, sizeof(err));
-  for (char* p = err; *p; p++) if (*p == '"') *p = '\'';
-
-  char resp[256];
+  char resp[128];
   snprintf(resp, sizeof(resp),
-    "{\"loaded\":%s,\"size_kb\":%d,\"arena_kb\":%d,\"err\":\"%s\"}",
+    "{\"loaded\":%s,\"size_kb\":%d,\"arena_kb\":%d}",
     modelLoaded ? "true" : "false",
     (int)modelSizeKB,
-    modelLoaded ? (int)(interpreter->arena_used_bytes() / 1024) : 0,
-    err);
+    modelLoaded ? (int)(interpreter->arena_used_bytes() / 1024) : 0);
   server.send(200, "application/json", resp);
 }
 
@@ -947,21 +800,12 @@ void handlePredict() {
 void handleUploadDone() {
   if (uploadFile) uploadFile.close();
 
-  if (!modelFS().exists(MODEL_PATH)) {
+  if (!LittleFS.exists("/egg_model.tflite")) {
     server.send(500, "application/json", "{\"ok\":false,\"error\":\"save_failed\"}");
     return;
   }
-  File f  = modelFS().open(MODEL_PATH, "r");
+  File f  = LittleFS.open("/egg_model.tflite", "r");
   size_t sz = f.size(); f.close();
-
-  // Tolak file kosong/terlalu kecil (mis. unduhan model gagal) — JANGAN restart
-  // dengan model rusak; hapus agar tidak menutupi model lama yang valid.
-  if (sz < MIN_MODEL_SIZE) {
-    modelFS().remove(MODEL_PATH);
-    Serial.printf("[UPLOAD] Ditolak: model hanya %u B (rusak)\n", (unsigned)sz);
-    server.send(400, "application/json", "{\"ok\":false,\"error\":\"model_too_small\"}");
-    return;
-  }
 
   char resp[96];
   snprintf(resp, sizeof(resp),
@@ -976,9 +820,8 @@ void handleUploadDone() {
 void handleUploadChunk() {
   HTTPUpload& up = server.upload();
   if (up.status == UPLOAD_FILE_START) {
-    Serial.printf("[UPLOAD] Start: %s → %s\n", up.filename.c_str(),
-                  sdMounted ? "SD card" : "LittleFS");
-    uploadFile = modelFS().open(MODEL_PATH, "w");
+    Serial.printf("[UPLOAD] Start: %s\n", up.filename.c_str());
+    uploadFile = LittleFS.open("/egg_model.tflite", "w");
   } else if (up.status == UPLOAD_FILE_WRITE) {
     if (uploadFile) uploadFile.write(up.buf, up.currentSize);
   } else if (up.status == UPLOAD_FILE_END) {
@@ -1016,32 +859,27 @@ void setup() {
   // 2. SD card (opsional — tanpa SD, dataset jatuh ke mode download)
   sdMounted = initSD();
 
-  // 3. TFLite — muat model DULU (sebelum kamera) agar buffer model + arena
-  //    dapat blok PSRAM yang masih segar. Bila dialokasikan setelah kamera +
-  //    rgbArena, PSRAM bisa terfragmentasi → ps_malloc model gagal walau total
-  //    bebas masih banyak.
+  // 3. Kamera — VGA double-buffer, tidak pernah berganti resolusi
+  //    (Freenove: kamera selalu berdaya, tanpa AXP313A)
+  if (!initCamera()) return;
+  loadCameraSettings();   // terapkan setting custom tersimpan di NVS
+
+  // 4. Pre-alokasi PSRAM decode buffer (921 KB) — zero malloc/free saat inferensi
+  rgbArena = (uint8_t*) ps_malloc((size_t)RGB_MAX_W * RGB_MAX_H * 3);
+  if (!rgbArena) { Serial.println("[ERROR] ps_malloc rgbArena gagal"); return; }
+  Serial.printf("[OK] rgbArena: %d KB di PSRAM\n",
+    (int)((size_t)RGB_MAX_W * RGB_MAX_H * 3 / 1024));
+
+  // 5. TFLite ops (registrasi satu kali sebelum load model)
   resolver.AddConv2D();
   resolver.AddDepthwiseConv2D();
   resolver.AddAveragePool2D();
-  resolver.AddMean();      // GlobalAveragePooling2D → MEAN di TF ≥2.x
-  resolver.AddPad();       // ZeroPadding2D pada blok stride-2 MobileNetV1
   resolver.AddReshape();
   resolver.AddFullyConnected();
   resolver.AddLogistic();
   resolver.AddQuantize();
   resolver.AddDequantize();
   initTFLite();
-
-  // 4. Kamera — VGA double-buffer, tidak pernah berganti resolusi
-  //    (Freenove: kamera selalu berdaya, tanpa AXP313A)
-  if (!initCamera()) return;
-  loadCameraSettings();   // terapkan setting custom tersimpan di NVS
-
-  // 5. Pre-alokasi PSRAM decode buffer (921 KB) — zero malloc/free saat inferensi
-  rgbArena = (uint8_t*) ps_malloc((size_t)RGB_MAX_W * RGB_MAX_H * 3);
-  if (!rgbArena) { Serial.println("[ERROR] ps_malloc rgbArena gagal"); return; }
-  Serial.printf("[OK] rgbArena: %d KB di PSRAM\n",
-    (int)((size_t)RGB_MAX_W * RGB_MAX_H * 3 / 1024));
 
   // 6. Dual-core: semaphore + inference task di Core 0 (prio 5)
   inferTrigSem = xSemaphoreCreateBinary();
@@ -1051,29 +889,15 @@ void setup() {
   );
   Serial.println("[OK] Inference task → Core 0 (prio 5)");
 
-  // 7. WiFi — kombinasi yang menang: modem sleep OFF (RTT cepat, tanpa tunggu
-  //    DTIM ~100ms tiap round-trip → throughput naik) DIGABUNG TX power rendah
-  //    (lonjakan arus TX kecil → tidak brownout). Brownout dulu terjadi karena
-  //    sleep-off DENGAN TX power PENUH; di sini TX sudah 13dBm. setSleep(false)
-  //    dipasang di GOT_IP (setelah terhubung, bukan saat asosiasi).
-  WiFi.mode(WIFI_STA);
-  WiFi.setAutoReconnect(true);
+  // 7. WiFi — event-driven reconnect (tidak perlu polling di loop)
   WiFi.onEvent([](WiFiEvent_t event) {
-    if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
-      WiFi.setSleep(false);   // radio nyala terus → tak ada jeda DTIM per paket
-      Serial.printf("[WiFi] IP: %s\n", WiFi.localIP().toString().c_str());
-      // IP DHCP bisa berubah antar boot — umumkan ulang telur.local
-      MDNS.end();
-      if (MDNS.begin("telur")) Serial.println("[WiFi] mDNS: http://telur.local");
+    if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
+      WiFi.reconnect();
     }
   });
   WiFi.begin(WIFI_SSID, WIFI_PASS);
-  // Turunkan TX power dari ~19.5dBm → 13dBm: lonjakan arus saat transmit jauh
-  // berkurang (sumber utama brownout di board kamera). Aman karena AP dekat/kuat.
-  // Kalau sinyal jadi lemah/putus, naikkan ke WIFI_POWER_15dBm atau _17dBm.
-  WiFi.setTxPower(WIFI_POWER_13dBm);
   Serial.printf("[..] Connecting to '%s'", WIFI_SSID);
-  for (int t = 0; t < 80 && WiFi.status() != WL_CONNECTED; t++) {
+  for (int t = 0; t < 60 && WiFi.status() != WL_CONNECTED; t++) {
     vTaskDelay(pdMS_TO_TICKS(250));
     updateLED();
     if (t % 2 == 0) Serial.print(".");
@@ -1082,10 +906,17 @@ void setup() {
     Serial.printf("\n[OK] WiFi: http://%s\n", WiFi.localIP().toString().c_str());
     neopixelWrite(RGB_LED_PIN, 0, 12, 0);
   } else {
-    Serial.println("\n[WARN] WiFi gagal connect — stack auto-reconnect jalan terus");
+    Serial.println("\n[WARN] WiFi gagal — akan retry otomatis via event");
   }
 
-  // 8. Routes HTTP — aset statik (/, *.html, *.js, *.css) lewat onNotFound
+  // 8. mDNS
+  if (MDNS.begin("telur")) Serial.println("[OK] mDNS: http://telur.local");
+
+  // 9. Routes HTTP
+  server.on("/",             HTTP_GET,  handleRoot);
+  server.on("/index.html",   HTTP_GET,  handleRoot);
+  server.on("/app.js",       HTTP_GET,  handleAppJS);
+  server.on("/style.css",    HTTP_GET,  handleCSS);
   server.on("/capture",      HTTP_GET,  handleCapture);
   server.on("/predict",      HTTP_GET,  handlePredict);
   server.on("/model_info",   HTTP_GET,  handleModelInfo);
@@ -1100,7 +931,6 @@ void setup() {
   server.on("/camera/get",   HTTP_GET,  handleCamGet);
   server.on("/camera/set",   HTTP_POST, handleCamSet);
   server.on("/camera/reset", HTTP_POST, handleCamReset);
-  server.onNotFound(handleStatic);   // aset web UI dari LittleFS
   server.begin();
 
   Serial.println("[OK] HTTP server\n");
@@ -1119,11 +949,9 @@ void setup() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Loop — Core 1: WebServer + LED. WiFi (re)connect ditangani stack.
+// Loop — Core 1: WebServer + LED. WiFi reconnect via event handler.
 // ─────────────────────────────────────────────────────────────
 void loop() {
   server.handleClient();
   updateLED();
-  delay(2);   // jangan busy-spin Core 1 — beri napas ke task sistem (WiFi/lwIP,
-              // IDLE) & turunkan konsumsi daya/panas; HTTP tetap responsif
 }

@@ -35,128 +35,16 @@ body {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 9px; }
 
-/* ── App shell: sidebar kiri + main ───────────────────────── */
-body { margin: 0; }
+/* ── Header ───────────────────────────────────────────────── */
 .top-accent {
   height: 3px;
   background: linear-gradient(90deg, #4f46e5, #7c3aed 45%, #db2777);
 }
-.app-shell { display: flex; min-height: 100vh; }
-
-#sidebar {
-  width: 208px;
-  flex-shrink: 0;
-  position: sticky;
-  top: 0;
-  height: 100vh;
-  display: flex;
-  flex-direction: column;
-  background: rgba(255,255,255,0.025);
-  border-right: 1px solid var(--border);
-  transition: width 0.22s ease;
-  overflow: hidden;
-  z-index: 30;
-}
-.sb-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 16px 13px 12px;
-}
-.sb-logo {
-  width: 38px; height: 38px;
-  flex-shrink: 0;
-  border-radius: 12px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 18px;
-  background: linear-gradient(135deg, #4f46e5, #7c3aed);
-  box-shadow: 0 0 16px rgba(99,102,241,0.4);
-}
-.sb-title h1 {
-  font-size: 14px;
-  font-weight: 800;
-  letter-spacing: -0.02em;
-  margin: 0;
-  white-space: nowrap;
-}
-.sb-title p {
-  font-size: 10px;
-  color: var(--text-3);
-  margin: 2px 0 0;
-  white-space: nowrap;
-}
-.sb-nav {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 8px;
-}
-.sb-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  padding: 10px 12px;
-  border: none;
-  border-radius: 12px;
-  background: transparent;
-  color: var(--text-2);
-  font-family: 'Inter', sans-serif;
-  font-size: 13px;
-  font-weight: 500;
-  letter-spacing: -0.01em;
-  white-space: nowrap;
-  cursor: pointer;
-  transition: all 0.2s ease;
-  text-align: left;
-}
-.sb-item:hover:not(.active) { background: rgba(255,255,255,0.05); color: var(--text-1); }
-.sb-item.active {
-  background: linear-gradient(135deg, #4f46e5, #7c3aed);
-  color: #fff;
-  box-shadow: 0 2px 12px rgba(99,102,241,0.4);
-}
-.sb-ico { width: 20px; text-align: center; flex-shrink: 0; }
-.sb-foot { padding: 8px; border-top: 1px solid var(--border); }
-.sb-wifi {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  white-space: nowrap;
-}
-
-/* Collapsed: hanya ikon */
-.app-shell.sb-collapsed #sidebar { width: 62px; }
-.app-shell.sb-collapsed .sb-label,
-.app-shell.sb-collapsed .sb-title { display: none; }
-
-/* ── Workspace: kamera kiri-atas (sticky), konten kanan ───── */
-.main { flex: 1; min-width: 0; }
-.workspace {
-  display: grid;
-  grid-template-columns: minmax(300px, 440px) minmax(0, 1fr);
-  gap: 16px;
-  padding: 16px;
-  align-items: start;
-  max-width: 1500px;
-}
-#cam-col { position: sticky; top: 16px; }
-#content-col { min-width: 0; max-width: 880px; padding-bottom: 32px; }
-
-/* Tab tanpa kamera (Kelola/Training): konten pakai seluruh lebar */
-.workspace.no-cam { grid-template-columns: minmax(0, 1fr); }
-.workspace.no-cam #cam-col { display: none; }
-
-@media (max-width: 900px) {
-  .workspace { grid-template-columns: 1fr; }
-  #cam-col { position: static; }
-  #sidebar { width: 62px; }
-  .sb-label, .sb-title { display: none !important; }
-  #sb-toggle { display: none; }
+#app-header {
+  background: rgba(7,9,26,0.88);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-bottom: 1px solid var(--border);
 }
 
 /* ── Camera ───────────────────────────────────────────────── */
@@ -164,12 +52,11 @@ body { margin: 0; }
   background: #000;
   position: relative;
   overflow: hidden;
-  border-radius: var(--radius);
-  border: 1px solid var(--border);
 }
 #preview {
   display: block;
   width: 100%;
+  max-height: 44vh;
   object-fit: contain;
   transition: opacity 0.15s ease;
 }
@@ -201,6 +88,49 @@ body { margin: 0; }
   font-weight: 600;
   border-radius: 999px;
   padding: 2px 10px;
+}
+
+/* ── Tab bar pill ─────────────────────────────────────────── */
+#tab-bar {
+  background: rgba(7,9,26,0.9);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-bottom: 1px solid var(--border);
+}
+.tab-pills {
+  display: flex;
+  gap: 4px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px;
+}
+.tab-pill {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 13px;
+  font-weight: 500;
+  font-family: 'Inter', sans-serif;
+  padding: 8px 0;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: all 0.25s ease;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+@media (max-width: 460px) {
+  .tab-pill { font-size: 10px; padding: 8px 0; }
+}
+.tab-pill:hover:not(.active) {
+  color: var(--text-1);
+  background: rgba(255,255,255,0.05);
+}
+.tab-pill.active {
+  background: linear-gradient(135deg, #4f46e5, #7c3aed);
+  color: #fff;
+  box-shadow: 0 2px 12px rgba(99,102,241,0.4);
 }
 
 /* ── Glass card ───────────────────────────────────────────── */
@@ -736,33 +666,6 @@ input.range:disabled { opacity: 0.4; cursor: not-allowed; }
   background: #c7d2fe;
 }
 .switch input:disabled + .switch-track { opacity: 0.4; cursor: not-allowed; }
-
-/* ── Stat box (tab Training) ──────────────────────────────── */
-.stat-box {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-  padding: 16px 8px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-}
-.stat-good { background: rgba(74,222,128,0.07);  border-color: rgba(74,222,128,0.2); }
-.stat-bad  { background: rgba(248,113,113,0.07); border-color: rgba(248,113,113,0.2); }
-.stat-num {
-  font-size: 2rem;
-  font-weight: 900;
-  line-height: 1;
-  font-family: 'JetBrains Mono', monospace;
-}
-.stat-good .stat-num { color: var(--success); }
-.stat-bad  .stat-num { color: var(--danger); }
-.stat-label {
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  color: var(--text-2);
-}
 
 /* ── Kelola dataset (tab Kelola) ──────────────────────────── */
 .ds-tile {

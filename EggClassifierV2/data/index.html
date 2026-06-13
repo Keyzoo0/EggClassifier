@@ -4,92 +4,95 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Egg Classifier — ESP32-S3</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='80' font-size='80'>🥚</text></svg>">
 
-  <!-- Semua di-host di alat (LittleFS) — TANPA dependency internet supaya
-       halaman tampil cepat lewat LAN. Font: system stack (lihat style.css).
-       Tailwind: build purged ~8KB (bukan Play CDN 400KB + JIT).
-       Chart.js: di-lazy-load app.js hanya saat tab Prediksi dibuka. -->
-  <link rel="stylesheet" href="/tw.css">
+  <!-- Inter font — Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Chart.js — untuk donut skor -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+
+  <!-- Custom styles -->
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 
-<div id="app-shell" class="app-shell">
+<!-- Top accent gradient line -->
+<div class="top-accent"></div>
 
-<!-- ── Sidebar (collapsible) ────────────────────────────────── -->
-<aside id="sidebar">
-  <div class="sb-head">
-    <div class="sb-logo">🥚</div>
-    <div class="sb-title">
-      <h1>Egg Classifier</h1>
-      <p>Freenove ESP32-S3 · SD</p>
+<!-- ── Header ──────────────────────────────────────────────── -->
+<header id="app-header" class="sticky top-0 z-30">
+  <div class="max-w-2xl mx-auto px-4 h-14 flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <div class="w-9 h-9 rounded-xl flex items-center justify-center text-base flex-shrink-0"
+           style="background:linear-gradient(135deg,#4f46e5,#7c3aed);box-shadow:0 0 16px rgba(99,102,241,0.4)">
+        🥚
+      </div>
+      <div>
+        <h1 class="text-sm font-bold leading-none tracking-tight">Egg Classifier</h1>
+        <p class="text-xs mt-0.5" style="color:var(--text-3);font-size:11px">
+          Freenove ESP32-S3 · N8R8 + SD
+        </p>
+      </div>
     </div>
-  </div>
-
-  <nav class="sb-nav">
-    <button id="btn-dataset" class="sb-item active" onclick="switchTab('dataset')" title="Dataset (1)">
-      <span class="sb-ico">📷</span><span class="sb-label">Dataset</span>
-    </button>
-    <button id="btn-manage" class="sb-item" onclick="switchTab('manage')" title="Kelola (2)">
-      <span class="sb-ico">🗂️</span><span class="sb-label">Kelola</span>
-    </button>
-    <button id="btn-training" class="sb-item" onclick="switchTab('training')" title="Training (3)">
-      <span class="sb-ico">🚀</span><span class="sb-label">Training</span>
-    </button>
-    <button id="btn-predict" class="sb-item" onclick="switchTab('predict')" title="Prediksi (4)">
-      <span class="sb-ico">🔍</span><span class="sb-label">Prediksi</span>
-    </button>
-    <button id="btn-camera" class="sb-item" onclick="switchTab('camera')" title="Kamera (5)">
-      <span class="sb-ico">🎥</span><span class="sb-label">Kamera</span>
-    </button>
-  </nav>
-
-  <div class="sb-foot">
-    <div class="sb-wifi">
+    <div class="flex items-center gap-2">
       <span id="wifi-dot" class="w-2 h-2 rounded-full flex-shrink-0"
             style="background:#334155"></span>
-      <span id="wifi-text" class="sb-label text-xs font-medium"
+      <span id="wifi-text" class="text-xs font-medium"
             style="color:var(--text-2)">Menghubungkan...</span>
     </div>
-    <button id="sb-toggle" class="sb-item" onclick="toggleSidebar()" title="Ciutkan / lebarkan">
-      <span class="sb-ico" id="sb-toggle-ico">⏴</span><span class="sb-label">Ciutkan</span>
+  </div>
+</header>
+
+<!-- ── Camera Preview ───────────────────────────────────────── -->
+<div id="cam-wrap">
+  <img id="preview" src="/capture" alt="Live Preview"
+       onerror="previewError()" style="min-height:120px">
+
+  <div id="overlay-loading">
+    <div class="spinner"></div>
+    <span style="font-size:12px;color:var(--text-2)">Memuat kamera...</span>
+  </div>
+
+  <!-- Badges top-right -->
+  <div class="absolute top-2 right-2 flex gap-1.5">
+    <span id="frame-badge" class="cam-badge">
+      &#9654; <span id="frame-count">0</span>
+    </span>
+    <span id="busy-badge" class="cam-badge-busy hidden">
+      ⏳ Analisis...
+    </span>
+  </div>
+</div>
+
+<!-- ── Tab bar ──────────────────────────────────────────────── -->
+<div id="tab-bar" class="sticky z-20 px-4 py-3"
+     style="top:57px">
+  <div class="tab-pills max-w-md mx-auto">
+    <button id="btn-dataset" class="tab-pill active" onclick="switchTab('dataset')">
+      📷 &nbsp;Dataset
+    </button>
+    <button id="btn-manage" class="tab-pill" onclick="switchTab('manage')">
+      🗂️ &nbsp;Kelola
+    </button>
+    <button id="btn-training" class="tab-pill" onclick="switchTab('training')">
+      🚀 &nbsp;Training
+    </button>
+    <button id="btn-predict" class="tab-pill" onclick="switchTab('predict')">
+      🔍 &nbsp;Prediksi
+    </button>
+    <button id="btn-camera" class="tab-pill" onclick="switchTab('camera')">
+      🎥 &nbsp;Kamera
     </button>
   </div>
-</aside>
+</div>
 
 <!-- ── Main ─────────────────────────────────────────────────── -->
-<div class="main">
-  <div class="top-accent"></div>
-
-  <div id="workspace" class="workspace">
-
-    <!-- Kolom kiri-atas: kamera (sticky di desktop) -->
-    <section id="cam-col">
-      <div id="cam-wrap">
-        <!-- src diisi previewLoop() di app.js — semua request lewat antrian -->
-        <img id="preview" alt="Live Preview"
-             onerror="previewError()" style="min-height:120px">
-
-        <div id="overlay-loading">
-          <div class="spinner"></div>
-          <span style="font-size:12px;color:var(--text-2)">Memuat kamera...</span>
-        </div>
-
-        <!-- Badges top-right -->
-        <div class="absolute top-2 right-2 flex gap-1.5">
-          <span id="frame-badge" class="cam-badge">
-            &#9654; <span id="frame-count">0</span>
-          </span>
-          <span id="busy-badge" class="cam-badge-busy hidden">
-            ⏳ Analisis...
-          </span>
-        </div>
-      </div>
-    </section>
-
-    <!-- Kolom kanan + bawah: isi tab -->
-    <section id="content-col" class="space-y-4">
+<main class="max-w-2xl mx-auto px-4 pt-4 pb-12 space-y-4">
 
 <!-- ═══════════════ TAB DATASET ════════════════════════════ -->
 <div id="tab-dataset" class="space-y-4">
@@ -218,25 +221,6 @@
 <!-- ═══════════════ TAB TRAINING ═══════════════════════════ -->
 <div id="tab-training" class="hidden space-y-4">
 
-  <!-- Ringkasan dataset — pengganti preview kamera (dimatikan di tab ini) -->
-  <div class="card p-4">
-    <div class="flex items-center justify-between mb-3">
-      <h3 class="text-sm font-semibold" style="color:var(--text-1)">Dataset Siap Training</h3>
-      <span class="text-xs" style="color:var(--text-3)">📵 kamera off</span>
-    </div>
-    <div class="grid grid-cols-2 gap-3">
-      <div class="stat-box stat-good">
-        <span id="train-good" class="stat-num">0</span>
-        <span class="stat-label">✅ BAGUS</span>
-      </div>
-      <div class="stat-box stat-bad">
-        <span id="train-bad" class="stat-num">0</span>
-        <span class="stat-label">❌ CACAT</span>
-      </div>
-    </div>
-    <p id="train-total" class="text-xs text-center mt-3" style="color:var(--text-3)"></p>
-  </div>
-
   <!-- Pipeline: satu tombol, full otomatis -->
   <div class="card p-4 space-y-3">
     <h3 class="text-sm font-semibold" style="color:var(--text-1)">Training Otomatis — GitHub Actions</h3>
@@ -324,11 +308,10 @@
   <div id="no-model-warning" class="warn-box">
     <p class="text-sm font-semibold mb-1" style="color:var(--warn)">⚠️ Belum ada model</p>
     <p class="text-xs" style="color:#fde68a">
-      Buka tab <b>🚀 Training</b> lalu jalankan pipeline, atau klik
-      "Pasang Model Ini ke Alat" pada kartu Model Terakhir di GitHub.
+      Upload file
+      <code style="background:rgba(245,158,11,0.15);padding:1px 5px;border-radius:4px">egg_model.tflite</code>
+      dari Google Colab di bagian Model di bawah.
     </p>
-    <p id="model-err" class="text-xs mt-1.5 hidden"
-       style="color:#fca5a5;font-family:monospace"></p>
   </div>
 
   <!-- Result card -->
@@ -374,15 +357,45 @@
     <div id="history-list" class="space-y-2"></div>
   </div>
 
-  <!-- Status model — pemasangan model lewat tab Training -->
-  <div class="card p-4 space-y-2">
+  <!-- Model management -->
+  <div class="card p-4 space-y-3">
     <div class="flex items-center justify-between">
       <h3 class="text-sm font-semibold" style="color:var(--text-1)">Model TFLite</h3>
       <span id="model-status" class="badge-missing">Tidak ada model</span>
     </div>
-    <p class="text-xs" style="color:var(--text-3)">
-      Model dipasang otomatis dari tab <b>🚀 Training</b> dan tersimpan di
-      SD card — tidak hilang saat alat mati maupun saat web UI diperbarui.
+
+    <!-- Dropzone -->
+    <label class="block cursor-pointer">
+      <div class="dropzone" id="dropzone-area">
+        <div class="flex flex-col items-center gap-1.5">
+          <span style="font-size:1.75rem">📦</span>
+          <span id="file-label" class="text-xs font-medium" style="color:var(--text-2)">
+            Pilih atau drop file .tflite
+          </span>
+          <span style="font-size:11px;color:var(--text-3)">dari hasil training Google Colab</span>
+        </div>
+      </div>
+      <input type="file" id="model-file" accept=".tflite" class="hidden"
+             onchange="onFileSelected(this)">
+    </label>
+
+    <button id="upload-btn" class="btn-upload" onclick="uploadModel()" disabled>
+      ⬆️ &nbsp;Upload &amp; Aktifkan Model
+    </button>
+
+    <!-- Upload progress -->
+    <div id="upload-progress" class="hidden space-y-1.5">
+      <div class="bar-track">
+        <div id="upload-fill" class="bar-upload" style="width:0%"></div>
+      </div>
+      <p id="upload-status" class="text-xs text-center" style="color:var(--text-2)">
+        Mengunggah...
+      </p>
+    </div>
+
+    <p class="text-xs pt-2 border-t" style="color:var(--text-3);border-color:rgba(255,255,255,0.05)">
+      Setelah upload, board restart otomatis (~3 detik).
+      Model tersimpan permanen di flash meskipun board mati.
     </p>
   </div>
 
@@ -421,12 +434,7 @@
 
 </div><!-- /tab-camera -->
 
-    </section><!-- /content-col -->
-
-  </div><!-- /workspace -->
-</div><!-- /main -->
-
-</div><!-- /app-shell -->
+</main>
 
 <!-- Toast container -->
 <div id="toast-container"
