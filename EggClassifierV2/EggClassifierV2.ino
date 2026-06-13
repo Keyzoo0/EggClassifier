@@ -1066,6 +1066,10 @@ void setup() {
     }
   });
   WiFi.begin(WIFI_SSID, WIFI_PASS);
+  // Turunkan TX power dari ~19.5dBm → 13dBm: lonjakan arus saat transmit jauh
+  // berkurang (sumber utama brownout di board kamera). Aman karena AP dekat/kuat.
+  // Kalau sinyal jadi lemah/putus, naikkan ke WIFI_POWER_15dBm atau _17dBm.
+  WiFi.setTxPower(WIFI_POWER_13dBm);
   Serial.printf("[..] Connecting to '%s'", WIFI_SSID);
   for (int t = 0; t < 80 && WiFi.status() != WL_CONNECTED; t++) {
     vTaskDelay(pdMS_TO_TICKS(250));
