@@ -820,23 +820,3 @@ kbd {
   color: rgba(255,255,255,0.55);
   line-height: 1.6;
 }
-
-/* ── Tab Sistem: log prediksi ───────────────────────────────── */
-.log-box {
-  max-height: 320px;
-  overflow-y: auto;
-  font-size: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  color: var(--text-2);
-}
-.log-row {
-  display: grid;
-  grid-template-columns: 1fr auto auto auto;
-  gap: 12px;
-  align-items: baseline;
-  padding: 5px 8px;
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.03);
-}

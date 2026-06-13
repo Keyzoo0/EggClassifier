@@ -1,5 +1,5 @@
 /*
- * EggClassifier V2 — Firmware Terpadu (RTOS + N16R8 Maximized)
+ * EggClassifier V2 — Firmware Terpadu (RTOS + PSRAM Optimized)
  * Board  : Freenove ESP32-S3-WROOM CAM (FNK0085, N16R8) + microSD 4GB
  *
  * Library (Tools → Manage Libraries):
@@ -8,39 +8,38 @@
  *
  * Board Settings (Tools):
  *   Board            : ESP32S3 Dev Module
- *   Flash Size       : 16MB (128Mb)   ← varian N16R8 (esptool detect 16MB)
- *   Partition Scheme : Custom  ← memakai partitions.csv di folder sketch ini
- *                      (16MB dual-OTA: app 2×6.25MB + LittleFS 3.43MB;
- *                      menu "Default 16MB" tidak ada utk ESP32S3 di core 3.x)
+ *   Flash Size       : 16MB (128Mb)   ← board ini varian N16R8 (esptool detect 16MB)
+ *   Partition Scheme : Huge APP (3MB No OTA/1MB SPIFFS)
  *   PSRAM            : OPI PSRAM
  *   CPU Frequency    : 240MHz
  *   USB CDC On Boot  : Enabled
  *
- * ── TATA KELOLA MEMORI ─────────────────────────────────────────
- *   Flash app (2×6.25MB OTA) : firmware — update via web /ota
- *   LittleFS (3.43MB)        : SEMUA yang dibutuhkan alat agar berfungsi
- *                              mandiri tanpa SD: web UI + model (PRIMER).
- *                              Update per-file via /fs/upload (tanpa plugin).
- *   SD card (4GB, FAT32)     : data besar/tumbuh: /dataset/, log prediksi
- *                              /predict_log.csv, backup model (auto-restore
- *                              ke LittleFS saat boot bila LittleFS kosong).
- *   NVS                      : pengaturan kamera (Preferences "camcfg")
- *   PSRAM (8MB OPI)          : frame buffer kamera 2×VGA, rgbArena 921KB,
- *                              buffer model ~315KB
- *   SRAM internal (512KB)    : tensor arena bila muat (akses jauh lebih
- *                              cepat dari PSRAM → inferensi lebih singkat),
- *                              fallback otomatis ke PSRAM
+ * SD card: microSD 4GB, format FAT32 (allocation unit 16K),
+ *   SDMMC 1-bit — CMD=38, CLK=39, D0=40. Dataset di /dataset/.
  *
  * Arsitektur dual-core:
  *   Core 0 (prio 5) — inferenceTask: TFLite Invoke
  *   Core 1 (prio 1) — loop(): WebServer.handleClient + LED + SD I/O
  *
+ * PRIORITAS #1 — web lancar diakses client:
+ *   - WiFi modem sleep OFF (default ON: tiap request tertahan 100–500 ms
+ *     menunggu radio bangun; terukur ping 167 ms avg → ~5 ms setelah OFF)
+ *   - Reconnect berjeda ≥5 dtk di loop(), bukan beruntun di event handler
+ *   - mDNS diumumkan ulang tiap dapat IP (IP DHCP bisa berubah)
+ *   - WebServer sinkron hanya melayani SATU koneksi pada satu waktu —
+ *     web UI (app.js) mengantre semua request agar tidak saling menahan
+ *
+ * PSRAM layout (~1.4 MB dari 8 MB tersedia):
+ *   rgbArena    640×480×3 = 921 KB  — decode JPEG→RGB888 (pre-alokasi)
+ *   tensorArena 200 KB              — TFLite working area
+ *   modelBuf    ~315 KB             — flat buffer model .tflite
+ *
  * Endpoints:
- *   GET  /              → Web UI (LittleFS; halaman pemulihan bila kosong)
+ *   GET  /              → Web UI (LittleFS)
  *   GET  /capture       → JPEG frame live (preview & download dataset)
- *   GET  /predict       → inference → JSON hasil (+ catat ke log SD)
- *   GET  /model_info    → JSON: {loaded, size_kb, arena_kb, arena_loc, model_loc, err}
- *   POST /upload_model  → .tflite → LittleFS (+ backup SD) → restart
+ *   GET  /predict       → inference → JSON hasil
+ *   GET  /model_info    → JSON: {loaded, size_kb, arena_kb, err}
+ *   POST /upload_model  → .tflite → SD card (fallback LittleFS) → restart
  *   GET  /sd/info       → JSON: {mounted, good, bad, used_mb, total_mb}
  *   POST /sd/capture    → ?label=good|bad → simpan JPEG ke SD
  *   GET  /sd/list       → JSON daftar file dataset di SD
@@ -51,11 +50,6 @@
  *   GET  /camera/get    → JSON semua parameter sensor OV2640
  *   POST /camera/set    → ?var=brightness&val=1 → set + simpan ke NVS
  *   POST /camera/reset  → hapus setting custom → restart (default pabrik)
- *   GET  /sys/info      → JSON statistik memori/penyimpanan/firmware
- *   POST /ota           → update firmware via web (butuh partisi dual-OTA)
- *   POST /fs/upload     → upload file web UI ke LittleFS (ganti plugin)
- *   GET  /log           → CSV log prediksi dari SD (?tail=1 → 16KB terakhir)
- *   POST /log/clear     → hapus log prediksi
  */
 
 #include <WiFi.h>
@@ -64,11 +58,6 @@
 #include <LittleFS.h>
 #include <SD_MMC.h>
 #include <Preferences.h>
-#include <Update.h>
-#include <esp_ota_ops.h>
-#include <esp_heap_caps.h>
-#include <time.h>
-#include <new>
 #include "esp_camera.h"
 #include "img_converters.h"
 #include "TensorFlowLite_ESP32.h"
@@ -83,8 +72,6 @@
 // ── Credentials ───────────────────────────────────────────────
 #define WIFI_SSID  "ROSI1"
 #define WIFI_PASS  "20517420"
-
-#define FW_VERSION "2.2.0"
 
 // ── Pin Camera — Freenove FNK0085 (profil ESP32S3_EYE) ───────
 #define CAM_PWDN   -1
@@ -162,9 +149,7 @@ static bool sdParseName(const char* base, bool* isGood, uint32_t* idx) {
 }
 
 // TFLite
-static uint8_t*                           tensorArena   = nullptr;
-static bool                               arenaInternal = false;  // arena di SRAM?
-static const char*                        modelLoc      = "none"; // littlefs|sd
+static uint8_t*                           tensorArena = nullptr;
 static tflite::MicroMutableOpResolver<12> resolver;
 
 // Error reporter yang menyimpan pesan terakhir — alasan gagal load
@@ -185,15 +170,15 @@ static TfLiteTensor*                      outTensor   = nullptr;
 bool   modelLoaded = false;
 size_t modelSizeKB = 0;
 
-// Slot interpreter (placement-new) — interpreter bisa dibangun ulang saat
-// arena dipindah dari PSRAM ke SRAM internal tanpa alokasi dinamis baru
-alignas(16) static uint8_t interpSlot[sizeof(tflite::MicroInterpreter)];
-
 // PSRAM decode buffer — pre-alokasi sekali, tidak malloc/free tiap inferensi
 static uint8_t* rgbArena = nullptr;
 
 // Dual-core sync: inferensi di Core 0, HTTP di Core 1
 volatile bool classifying = false;
+
+// WiFi reconnect berjeda — flag di-set event handler, eksekusi di loop()
+static volatile bool wifiNeedReconnect = false;
+static uint32_t      wifiRetryMs       = 0;
 
 struct InferResult {
   float    score;
@@ -259,7 +244,8 @@ bool initCamera() {
   cfg.pixel_format = PIXFORMAT_JPEG;
   cfg.grab_mode    = CAMERA_GRAB_LATEST;  // selalu ambil frame terbaru
   cfg.frame_size   = FRAMESIZE_VGA;       // 640×480, tidak pernah berubah
-  cfg.jpeg_quality = 6;
+  cfg.jpeg_quality = 10;  // 0=terbaik; q10 cukup utk training 96×96 dan
+                          // frame ±40% lebih kecil dari q6 → preview gesit
   cfg.fb_count     = 2;                   // double-buffer di PSRAM
   cfg.fb_location  = CAMERA_FB_IN_PSRAM;
 
@@ -403,91 +389,23 @@ void handleCamReset() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Model storage — LittleFS PRIMER (alat berfungsi tanpa SD),
-// SD card = backup otomatis. Saat boot kedua salinan disinkron:
-//   LittleFS kosong + SD ada  → pulihkan SD → LittleFS
-//   keduanya ada, ukuran beda → LittleFS menang → salin ke SD
-// Jadi model selamat dari upload ulang LittleFS (plugin lama)
-// MAUPUN dari SD card dicabut/diganti.
+// TFLite: load model → PSRAM
+// Model disimpan di SD card (tahan terhadap upload ulang LittleFS
+// yang menimpa seluruh partisi); LittleFS hanya fallback tanpa SD.
 // ─────────────────────────────────────────────────────────────
-#define MODEL_PATH       "/egg_model.tflite"
-#define PREDICT_LOG_PATH "/predict_log.csv"
-
-static bool copyFile(fs::FS& src, fs::FS& dst, const char* path) {
-  File in = src.open(path, "r");
-  if (!in) return false;
-  File out = dst.open(path, "w");
-  if (!out) { in.close(); return false; }
-  static uint8_t buf[4096];
-  bool ok = true;
-  while (in.available()) {
-    size_t n = in.read(buf, sizeof(buf));
-    if (n == 0 || out.write(buf, n) != n) { ok = false; break; }
-  }
-  in.close();
-  out.close();
-  if (!ok) dst.remove(path);   // jangan tinggalkan salinan korup
-  return ok;
-}
-
-static size_t fileSize(fs::FS& fs, const char* path) {
-  File f = fs.open(path, "r");
-  if (!f) return 0;
-  size_t s = f.size();
-  f.close();
-  return s;
-}
-
-void syncModelStorage() {
-  bool inLfs = LittleFS.exists(MODEL_PATH);
-  bool inSd  = sdMounted && SD_MMC.exists(MODEL_PATH);
-
-  if (!inLfs && inSd) {
-    Serial.println(copyFile(SD_MMC, LittleFS, MODEL_PATH)
-      ? "[TF] Model dipulihkan dari backup SD → LittleFS"
-      : "[WARN] Gagal memulihkan model dari SD");
-  } else if (inLfs && sdMounted &&
-             fileSize(LittleFS, MODEL_PATH) != fileSize(SD_MMC, MODEL_PATH)) {
-    Serial.println(copyFile(LittleFS, SD_MMC, MODEL_PATH)
-      ? "[TF] Backup model → SD card"
-      : "[WARN] Gagal backup model ke SD");
-  }
-}
-
-// ─────────────────────────────────────────────────────────────
-// TFLite: load model + alokasi arena
-// Pass 1: arena di PSRAM (pasti muat). Pass 2: bila SRAM internal
-// cukup, interpreter dibangun ulang dengan arena pas-ukuran di SRAM
-// — akses SRAM jauh lebih cepat dari PSRAM (bus OPI) sehingga
-// inferensi lebih singkat. Sisakan ≥120 KB SRAM untuk WiFi + HTTP.
-// ─────────────────────────────────────────────────────────────
-static bool buildInterpreter(const tflite::Model* model, uint8_t* arena, size_t arenaSz) {
-  if (interpreter) { interpreter->~MicroInterpreter(); interpreter = nullptr; }
-  memset(arena, 0, arenaSz);
-  interpreter = new (interpSlot)
-    tflite::MicroInterpreter(model, resolver, arena, arenaSz, &tfliteErrReporter);
-  if (interpreter->AllocateTensors() != kTfLiteOk) {
-    interpreter->~MicroInterpreter();
-    interpreter = nullptr;
-    return false;
-  }
-  inTensor  = interpreter->input(0);
-  outTensor = interpreter->output(0);
-  return true;
-}
+#define MODEL_PATH "/egg_model.tflite"
+static fs::FS& modelFS() { return sdMounted ? (fs::FS&)SD_MMC : (fs::FS&)LittleFS; }
 
 bool initTFLite() {
   File f;
-  if (LittleFS.exists(MODEL_PATH)) {
-    f = LittleFS.open(MODEL_PATH, "r");
-    modelLoc = "littlefs";
-    Serial.println("[TF] Model dari LittleFS");
-  } else if (sdMounted && SD_MMC.exists(MODEL_PATH)) {
+  if (sdMounted && SD_MMC.exists(MODEL_PATH)) {
     f = SD_MMC.open(MODEL_PATH, "r");
-    modelLoc = "sd";
     Serial.println("[TF] Model dari SD card");
+  } else if (LittleFS.exists(MODEL_PATH)) {
+    f = LittleFS.open(MODEL_PATH, "r");
+    Serial.println("[TF] Model dari LittleFS");
   } else {
-    Serial.println("[TF] Tidak ada model (LittleFS/SD)");
+    Serial.println("[TF] Tidak ada model (SD/LittleFS)");
     return false;
   }
   size_t sz = f.size();
@@ -506,7 +424,6 @@ bool initTFLite() {
     free(buf); return false;
   }
 
-  // Pass 1 — arena di PSRAM
   if (!tensorArena) {
     tensorArena = (uint8_t*) ps_malloc(ARENA_SIZE);
     if (!tensorArena) {
@@ -515,33 +432,26 @@ bool initTFLite() {
       free(buf); Serial.println("[TF] ps_malloc arena gagal"); return false;
     }
   }
-  if (!buildInterpreter(model, tensorArena, ARENA_SIZE)) {
+  memset(tensorArena, 0, ARENA_SIZE);
+
+  static tflite::MicroInterpreter interp(
+    model, resolver, tensorArena, ARENA_SIZE, &tfliteErrReporter
+  );
+  interpreter = &interp;
+
+  if (interpreter->AllocateTensors() != kTfLiteOk) {
     // Detail (mis. op tidak terdaftar) sudah tertangkap di errReporter.last
     Serial.println("[TF] AllocateTensors gagal — cek op resolver / ARENA_SIZE");
     return false;
   }
-
-  // Pass 2 — pindahkan arena ke SRAM internal bila muat
-  size_t need = interpreter->arena_used_bytes() + 16 * 1024;
-  if (heap_caps_get_free_size(MALLOC_CAP_INTERNAL) >= need + 120 * 1024) {
-    uint8_t* sram = (uint8_t*) heap_caps_malloc(need, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    if (sram && buildInterpreter(model, sram, need)) {
-      free(tensorArena);            // arena PSRAM tak terpakai lagi
-      tensorArena   = sram;
-      arenaInternal = true;
-    } else {
-      if (sram) free(sram);
-      if (!buildInterpreter(model, tensorArena, ARENA_SIZE)) return false;
-    }
-  }
-
   tfliteErrReporter.last[0] = '\0';   // sukses — bersihkan error lama
+
+  inTensor  = interpreter->input(0);
+  outTensor = interpreter->output(0);
   modelLoaded = true;
 
-  Serial.printf("[OK] TFLite: %d KB (%s) | arena %d KB di %s | input [%d,%d,%d,%d]\n",
-    (int)modelSizeKB, modelLoc,
-    (int)(interpreter->arena_used_bytes() / 1024),
-    arenaInternal ? "SRAM internal" : "PSRAM",
+  Serial.printf("[OK] TFLite: %d KB | arena: %d KB | input [%d,%d,%d,%d]\n",
+    (int)modelSizeKB, (int)(interpreter->arena_used_bytes() / 1024),
     inTensor->dims->data[0], inTensor->dims->data[1],
     inTensor->dims->data[2], inTensor->dims->data[3]);
   return true;
@@ -815,239 +725,16 @@ void handleSDUploadDone() {
 
 // ─────────────────────────────────────────────────────────────
 // HTTP: file dari LittleFS
-// Bila index.html belum ada (mis. flash pertama setelah ganti
-// partition scheme), sajikan halaman pemulihan tertanam di firmware:
-// upload web UI ke LittleFS / OTA langsung dari browser, tanpa plugin.
 // ─────────────────────────────────────────────────────────────
-static const char RECOVERY_HTML[] PROGMEM = R"rawliteral(
-<!DOCTYPE html><html lang="id"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Egg Classifier — Pemulihan</title>
-<style>body{font-family:sans-serif;background:#0f172a;color:#e2e8f0;max-width:480px;margin:40px auto;padding:0 16px}
-.card{background:#1e293b;border-radius:12px;padding:20px;margin-bottom:16px}
-h1{font-size:20px}h2{font-size:15px;margin:0 0 8px}p{font-size:13px;color:#94a3b8}
-code{color:#a5b4fc}input,button{width:100%;margin-top:8px;padding:10px;border-radius:8px;border:0;font-size:14px;box-sizing:border-box}
-button{background:#6366f1;color:#fff;font-weight:600;cursor:pointer}
-.st{font-size:13px;margin-top:8px;color:#a5b4fc}</style></head><body>
-<h1>🥚 Egg Classifier — Mode Pemulihan</h1>
-<p>File web UI belum ada di LittleFS. Upload <b>index.html, app.js, style.css</b>
-dari folder <code>EggClassifierV2/data/</code>, halaman akan dimuat ulang otomatis.</p>
-<div class="card"><h2>Upload Web UI</h2>
-<input type="file" id="f" multiple accept=".html,.js,.css">
-<button onclick="up()">Upload ke LittleFS</button><div class="st" id="st"></div></div>
-<div class="card"><h2>Update Firmware (OTA)</h2>
-<input type="file" id="fw" accept=".bin"><button onclick="ota()">Flash Firmware</button>
-<div class="st" id="st2"></div></div>
-<script>
-async function up(){const fs=document.getElementById('f').files,s=document.getElementById('st');
-if(!fs.length){s.textContent='Pilih file dulu';return}
-for(let i=0;i<fs.length;i++){s.textContent='Upload '+fs[i].name+'…';
-const fd=new FormData();fd.append('file',fs[i]);
-const r=await fetch('/fs/upload',{method:'POST',body:fd});
-if(!r.ok){s.textContent='Gagal: '+fs[i].name;return}}
-s.textContent='Selesai! Memuat ulang…';setTimeout(()=>location.reload(),800)}
-async function ota(){const f=document.getElementById('fw').files[0],s=document.getElementById('st2');
-if(!f){s.textContent='Pilih file .bin dulu';return}
-s.textContent='Flashing… jangan matikan alat';
-const fd=new FormData();fd.append('firmware',f);
-const r=await fetch('/ota',{method:'POST',body:fd});const j=await r.json().catch(()=>({}));
-s.textContent=j.ok?'Sukses! Alat restart…':'Gagal: '+(j.error||r.status)}
-</script></body></html>
-)rawliteral";
-
 void serveFile(const char* path, const char* mime) {
   if (!LittleFS.exists(path)) { server.send(404, "text/plain", "Not found"); return; }
   File f = LittleFS.open(path, "r");
   server.streamFile(f, mime);
   f.close();
 }
-void handleRoot() {
-  if (!LittleFS.exists("/index.html")) {
-    server.send_P(200, "text/html", RECOVERY_HTML);
-    return;
-  }
-  serveFile("/index.html", "text/html");
-}
+void handleRoot()  { serveFile("/index.html", "text/html"); }
 void handleAppJS() { serveFile("/app.js",     "application/javascript"); }
 void handleCSS()   { serveFile("/style.css",  "text/css"); }
-
-// ─────────────────────────────────────────────────────────────
-// HTTP: upload file web UI → LittleFS (/fs/upload)
-// Pengganti plugin "LittleFS Data Upload": per-file via web, partisi
-// tidak ditimpa total → model & file lain aman.
-// ─────────────────────────────────────────────────────────────
-static File   fsUpFile;
-static String fsUpName;
-static bool   fsUpError = false;
-
-void handleFSUploadChunk() {
-  HTTPUpload& up = server.upload();
-  if (up.status == UPLOAD_FILE_START) {
-    fsUpError = false;
-    fsUpName  = up.filename;
-    int slash = fsUpName.lastIndexOf('/');
-    if (slash >= 0) fsUpName = fsUpName.substring(slash + 1);
-    if (fsUpName.length() == 0 || fsUpName.indexOf("..") >= 0) { fsUpError = true; return; }
-    fsUpFile = LittleFS.open("/" + fsUpName, "w");
-    if (!fsUpFile) fsUpError = true;
-  } else if (up.status == UPLOAD_FILE_WRITE) {
-    if (fsUpFile && !fsUpError) fsUpFile.write(up.buf, up.currentSize);
-  } else if (up.status == UPLOAD_FILE_END) {
-    if (fsUpFile) fsUpFile.close();
-    if (!fsUpError)
-      Serial.printf("[FS] %s → LittleFS (%u bytes)\n",
-                    fsUpName.c_str(), (unsigned)up.totalSize);
-  } else if (up.status == UPLOAD_FILE_ABORTED) {
-    if (fsUpFile) fsUpFile.close();
-    fsUpError = true;
-  }
-}
-
-void handleFSUploadDone() {
-  if (fsUpError || fsUpName.length() == 0) {
-    server.send(500, "application/json", "{\"ok\":false,\"error\":\"upload_failed\"}");
-    return;
-  }
-  char resp[96];
-  snprintf(resp, sizeof(resp), "{\"ok\":true,\"file\":\"%s\"}", fsUpName.c_str());
-  server.send(200, "application/json", resp);
-}
-
-// ─────────────────────────────────────────────────────────────
-// HTTP: OTA firmware via web (/ota) — manfaat partisi dual-OTA 16MB.
-// Arduino IDE: Sketch → Export Compiled Binary → upload .ino.bin.
-// ─────────────────────────────────────────────────────────────
-// Slot OTA dianggap siap HANYA bila ada partisi app kedua. Penting:
-// huge_app punya subtype ota_0 tunggal → esp_ota_get_next_update_partition
-// "wrap" balik ke partisi yang SEDANG BERJALAN; menulis ke sana = brick.
-static bool otaSlotReady() {
-  const esp_partition_t* next = esp_ota_get_next_update_partition(NULL);
-  return next && next != esp_ota_get_running_partition();
-}
-
-static bool otaOk = false;
-
-void handleOTAChunk() {
-  HTTPUpload& up = server.upload();
-  if (up.status == UPLOAD_FILE_START) {
-    if (!otaSlotReady()) {
-      otaOk = false;
-      Serial.println("[OTA] Ditolak: tidak ada slot app kedua (partition scheme tanpa OTA)");
-      return;
-    }
-    otaOk = Update.begin(UPDATE_SIZE_UNKNOWN);
-    Serial.printf("[OTA] Mulai %s → %s\n", up.filename.c_str(),
-                  otaOk ? "ok" : Update.errorString());
-  } else if (up.status == UPLOAD_FILE_WRITE) {
-    if (otaOk && Update.write(up.buf, up.currentSize) != up.currentSize) {
-      otaOk = false;
-      Serial.printf("[OTA] Write gagal: %s\n", Update.errorString());
-    }
-  } else if (up.status == UPLOAD_FILE_END) {
-    if (otaOk) otaOk = Update.end(true);
-    Serial.printf("[OTA] Selesai: %s (%u bytes)\n",
-                  otaOk ? "sukses" : Update.errorString(), (unsigned)up.totalSize);
-  } else if (up.status == UPLOAD_FILE_ABORTED) {
-    Update.abort();
-    otaOk = false;
-  }
-}
-
-void handleOTADone() {
-  if (!otaOk) {
-    char resp[200];
-    snprintf(resp, sizeof(resp), "{\"ok\":false,\"error\":\"%s\"}",
-             otaSlotReady() ? Update.errorString()
-                            : "tidak ada slot OTA — pakai Partition Scheme: Custom (partitions.csv 16MB)");
-    server.send(500, "application/json", resp);
-    return;
-  }
-  server.send(200, "application/json", "{\"ok\":true,\"restarting\":true}");
-  vTaskDelay(pdMS_TO_TICKS(800));
-  Serial.println("[OTA] Restart ke firmware baru...");
-  ESP.restart();
-}
-
-// ─────────────────────────────────────────────────────────────
-// HTTP: statistik sistem (/sys/info) — untuk tab Sistem di web UI
-// ─────────────────────────────────────────────────────────────
-void handleSysInfo() {
-  const esp_partition_t* run = esp_ota_get_running_partition();
-  bool otaReady = otaSlotReady();
-
-  char resp[512];
-  snprintf(resp, sizeof(resp),
-    "{\"fw\":\"" FW_VERSION "\",\"built\":\"" __DATE__ " " __TIME__ "\","
-    "\"part\":\"%s\",\"ota\":%s,"
-    "\"heap_kb\":%u,\"heap_min_kb\":%u,\"heap_total_kb\":%u,"
-    "\"psram_kb\":%u,\"psram_free_kb\":%u,"
-    "\"lfs_kb\":%u,\"lfs_used_kb\":%u,"
-    "\"sd_mb\":%lu,\"sd_used_mb\":%lu,"
-    "\"model_loc\":\"%s\",\"arena_loc\":\"%s\","
-    "\"rssi\":%d,\"uptime_s\":%lu}",
-    run ? run->label : "?", otaReady ? "true" : "false",
-    (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024),
-    (unsigned)(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL) / 1024),
-    (unsigned)(heap_caps_get_total_size(MALLOC_CAP_INTERNAL) / 1024),
-    (unsigned)(ESP.getPsramSize() / 1024),
-    (unsigned)(ESP.getFreePsram() / 1024),
-    (unsigned)(LittleFS.totalBytes() / 1024),
-    (unsigned)(LittleFS.usedBytes() / 1024),
-    sdMounted ? (unsigned long)(SD_MMC.totalBytes() / (1024ULL * 1024ULL)) : 0,
-    sdMounted ? (unsigned long)(SD_MMC.usedBytes()  / (1024ULL * 1024ULL)) : 0,
-    modelLoc, arenaInternal ? "sram" : "psram",
-    (int)WiFi.RSSI(), (unsigned long)(millis() / 1000));
-  server.send(200, "application/json", resp);
-}
-
-// ─────────────────────────────────────────────────────────────
-// Log prediksi → CSV di SD card (bukti pengujian untuk laporan TA)
-// ─────────────────────────────────────────────────────────────
-static void fmtNow(char* out, size_t n) {
-  time_t now = time(nullptr);
-  if (now > 1700000000) {           // NTP sudah sinkron
-    struct tm t;
-    localtime_r(&now, &t);
-    strftime(out, n, "%Y-%m-%d %H:%M:%S", &t);
-  } else {
-    snprintf(out, n, "boot+%lus", (unsigned long)(millis() / 1000));
-  }
-}
-
-static void logPrediction(bool good, float score, uint32_t timeMs) {
-  if (!sdMounted) return;
-  bool fresh = !SD_MMC.exists(PREDICT_LOG_PATH);
-  File f = SD_MMC.open(PREDICT_LOG_PATH, FILE_APPEND);
-  if (!f) return;
-  if (fresh) f.println("waktu,label,skor,waktu_ms");
-  char ts[32];
-  fmtNow(ts, sizeof(ts));
-  f.printf("%s,%s,%.4f,%lu\n", ts, good ? "BAGUS" : "CACAT",
-           score, (unsigned long)timeMs);
-  f.close();
-}
-
-void handleLog() {
-  if (!sdMounted || !SD_MMC.exists(PREDICT_LOG_PATH)) {
-    server.send(404, "text/plain", "belum ada log");
-    return;
-  }
-  File f = SD_MMC.open(PREDICT_LOG_PATH, FILE_READ);
-  size_t start = 0;
-  if (server.hasArg("tail") && f.size() > 16384) start = f.size() - 16384;
-  f.seek(start);
-  server.setContentLength(f.size() - start);
-  server.send(200, "text/csv", "");
-  uint8_t buf[1024];
-  size_t n;
-  while ((n = f.read(buf, sizeof(buf))) > 0) server.client().write(buf, n);
-  f.close();
-}
-
-void handleLogClear() {
-  if (sdMounted) SD_MMC.remove(PREDICT_LOG_PATH);
-  server.send(200, "application/json", "{\"ok\":true}");
-}
 
 // ─────────────────────────────────────────────────────────────
 // HTTP: capture JPEG live — dipakai preview & download dataset
@@ -1073,14 +760,13 @@ void handleModelInfo() {
   strlcpy(err, tfliteErrReporter.last, sizeof(err));
   for (char* p = err; *p; p++) if (*p == '"') *p = '\'';
 
-  char resp[320];
+  char resp[256];
   snprintf(resp, sizeof(resp),
-    "{\"loaded\":%s,\"size_kb\":%d,\"arena_kb\":%d,"
-    "\"arena_loc\":\"%s\",\"model_loc\":\"%s\",\"err\":\"%s\"}",
+    "{\"loaded\":%s,\"size_kb\":%d,\"arena_kb\":%d,\"err\":\"%s\"}",
     modelLoaded ? "true" : "false",
     (int)modelSizeKB,
     modelLoaded ? (int)(interpreter->arena_used_bytes() / 1024) : 0,
-    arenaInternal ? "sram" : "psram", modelLoc, err);
+    err);
   server.send(200, "application/json", resp);
 }
 
@@ -1205,29 +891,20 @@ void handlePredict() {
     inferResult.score, (unsigned long)inferResult.time_ms,
     inferResult.good ? "true" : "false");
   server.send(200, "application/json", resp);
-
-  // Catat ke log SD setelah response terkirim (tidak menambah latensi)
-  logPrediction(inferResult.good, inferResult.score, inferResult.time_ms);
 }
 
 // ─────────────────────────────────────────────────────────────
-// HTTP: upload model .tflite → LittleFS (primer) + backup ke SD
-// → restart otomatis. Bila LittleFS gagal (penuh), fallback ke SD.
+// HTTP: upload model .tflite → LittleFS → restart otomatis
 // ─────────────────────────────────────────────────────────────
 void handleUploadDone() {
   if (uploadFile) uploadFile.close();
 
-  bool inLfs = LittleFS.exists(MODEL_PATH);
-  bool inSd  = sdMounted && SD_MMC.exists(MODEL_PATH);
-  if (!inLfs && !inSd) {
+  if (!modelFS().exists(MODEL_PATH)) {
     server.send(500, "application/json", "{\"ok\":false,\"error\":\"save_failed\"}");
     return;
   }
-
-  // Backup otomatis ke SD — model selamat walau LittleFS ditimpa plugin
-  if (inLfs && sdMounted) copyFile(LittleFS, SD_MMC, MODEL_PATH);
-
-  size_t sz = inLfs ? fileSize(LittleFS, MODEL_PATH) : fileSize(SD_MMC, MODEL_PATH);
+  File f  = modelFS().open(MODEL_PATH, "r");
+  size_t sz = f.size(); f.close();
 
   char resp[96];
   snprintf(resp, sizeof(resp),
@@ -1242,11 +919,9 @@ void handleUploadDone() {
 void handleUploadChunk() {
   HTTPUpload& up = server.upload();
   if (up.status == UPLOAD_FILE_START) {
-    uploadFile = LittleFS.open(MODEL_PATH, "w");
-    if (!uploadFile && sdMounted)            // LittleFS penuh/error → SD
-      uploadFile = SD_MMC.open(MODEL_PATH, "w");
     Serial.printf("[UPLOAD] Start: %s → %s\n", up.filename.c_str(),
-                  uploadFile ? "LittleFS" : "GAGAL");
+                  sdMounted ? "SD card" : "LittleFS");
+    uploadFile = modelFS().open(MODEL_PATH, "w");
   } else if (up.status == UPLOAD_FILE_WRITE) {
     if (uploadFile) uploadFile.write(up.buf, up.currentSize);
   } else if (up.status == UPLOAD_FILE_END) {
@@ -1284,9 +959,6 @@ void setup() {
   // 2. SD card (opsional — tanpa SD, dataset jatuh ke mode download)
   sdMounted = initSD();
 
-  // 2b. Sinkron model LittleFS ↔ SD (pulihkan/backup otomatis)
-  syncModelStorage();
-
   // 3. Kamera — VGA double-buffer, tidak pernah berganti resolusi
   //    (Freenove: kamera selalu berdaya, tanpa AXP313A)
   if (!initCamera()) return;
@@ -1319,33 +991,23 @@ void setup() {
   );
   Serial.println("[OK] Inference task → Core 0 (prio 5)");
 
-  // 7. WiFi — event-driven:
-  //    GOT_IP     → print IP + umumkan ulang mDNS + sinkron NTP. Router bisa
-  //                 memberi IP baru tiap connect; mDNS di-restart di sini agar
-  //                 telur.local SELALU menunjuk IP terbaru (akses pakai
-  //                 telur.local, jangan hafal IP).
-  //    DISCONNECT → log alasan + reconnect dengan jeda ≥5 dtk. Tanpa jeda,
-  //                 upaya connect bertumpuk → "sta is connecting, return error"
-  //                 dan pemulihan justru lebih lama.
-  WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
+  // 7. WiFi — prioritas #1: web selalu lancar diakses client
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(false);   // reconnect diatur sendiri (berjeda ≥5 dtk)
+  WiFi.onEvent([](WiFiEvent_t event) {
     if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
+      wifiNeedReconnect = false;
       Serial.printf("[WiFi] IP: %s\n", WiFi.localIP().toString().c_str());
+      // IP DHCP bisa berubah antar boot — umumkan ulang telur.local
       MDNS.end();
       if (MDNS.begin("telur")) Serial.println("[WiFi] mDNS: http://telur.local");
-      configTime(7 * 3600, 0, "pool.ntp.org", "time.google.com");  // WIB UTC+7
     } else if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
-      static uint32_t lastTry = 0;
-      Serial.printf("[WiFi] Putus (reason %d)\n",
-                    (int)info.wifi_sta_disconnected.reason);
-      if (millis() - lastTry > 5000) {
-        lastTry = millis();
-        WiFi.reconnect();
-      }
+      wifiNeedReconnect = true;   // jangan reconnect di sini — bisa beruntun
     }
   });
   WiFi.begin(WIFI_SSID, WIFI_PASS);
-  WiFi.setSleep(false);   // modem sleep OFF — default ON bikin respons HTTP
-                          // tersendat (latensi naik-turun, preview "muter")
+  WiFi.setSleep(false);   // modem sleep OFF — default ON membuat tiap request
+                          // HTTP tertahan 100–500 ms menunggu radio bangun
   Serial.printf("[..] Connecting to '%s'", WIFI_SSID);
   for (int t = 0; t < 60 && WiFi.status() != WL_CONNECTED; t++) {
     vTaskDelay(pdMS_TO_TICKS(250));
@@ -1356,10 +1018,10 @@ void setup() {
     Serial.printf("\n[OK] WiFi: http://%s\n", WiFi.localIP().toString().c_str());
     neopixelWrite(RGB_LED_PIN, 0, 12, 0);
   } else {
-    Serial.println("\n[WARN] WiFi gagal — retry otomatis tiap 5 dtk via event");
+    Serial.println("\n[WARN] WiFi gagal — retry otomatis berjeda 5 dtk");
   }
 
-  // 9. Routes HTTP
+  // 8. Routes HTTP
   server.on("/",             HTTP_GET,  handleRoot);
   server.on("/index.html",   HTTP_GET,  handleRoot);
   server.on("/app.js",       HTTP_GET,  handleAppJS);
@@ -1378,19 +1040,9 @@ void setup() {
   server.on("/camera/get",   HTTP_GET,  handleCamGet);
   server.on("/camera/set",   HTTP_POST, handleCamSet);
   server.on("/camera/reset", HTTP_POST, handleCamReset);
-  server.on("/sys/info",     HTTP_GET,  handleSysInfo);
-  server.on("/ota",          HTTP_POST, handleOTADone, handleOTAChunk);
-  server.on("/fs/upload",    HTTP_POST, handleFSUploadDone, handleFSUploadChunk);
-  server.on("/log",          HTTP_GET,  handleLog);
-  server.on("/log/clear",    HTTP_POST, handleLogClear);
   server.begin();
 
-  Serial.println("[OK] HTTP server");
-  const esp_partition_t* runPart = esp_ota_get_running_partition();
-  Serial.printf("[INFO] Partisi app: %s | OTA via web: %s\n\n",
-    runPart ? runPart->label : "?",
-    otaSlotReady()
-      ? "siap" : "TIDAK ADA — pakai Partition Scheme: Custom (partitions.csv)");
+  Serial.println("[OK] HTTP server\n");
   Serial.println("╔══════════════════════════════════════╗");
   Serial.printf( "║  http://telur.local                  ║\n");
   Serial.printf( "║  http://%-30s║\n",
@@ -1411,4 +1063,12 @@ void setup() {
 void loop() {
   server.handleClient();
   updateLED();
+
+  // Reconnect WiFi berjeda — di loop, bukan di event handler, agar stack
+  // WiFi tidak sibuk reconnect beruntun sampai HTTP tak terlayani
+  if (wifiNeedReconnect && millis() - wifiRetryMs >= 5000) {
+    wifiRetryMs = millis();
+    Serial.println("[WiFi] Reconnect...");
+    WiFi.reconnect();
+  }
 }

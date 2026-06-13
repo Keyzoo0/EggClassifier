@@ -54,3 +54,6 @@ Thumbs.db
 
 # Artefak training lokal (model hasil CI ada di /model/)
 training/models/
+
+# Salinan manual web UI (bukan sumber kebenaran)
+EggClassifierV2/backup/

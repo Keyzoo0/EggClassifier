@@ -74,30 +74,6 @@ OV2640 (JPEG VGA 640×480 — tidak pernah berganti resolusi)
 
 ---
 
-## Manajemen Memori — N16R8 Dimaksimalkan
-
-Pembagian peran setiap jenis memori (16 MB flash + 8 MB PSRAM + 512 KB SRAM + SD 4 GB):
-
-| Memori | Isi | Alasan |
-|---|---|---|
-| **Flash app — 2×6,25 MB (dual-OTA)** | Firmware | Update via web `/ota` tanpa kabel USB; slot kedua = rollback aman |
-| **LittleFS — 3,43 MB** | Web UI + **model (primer)** | Semua yang dibutuhkan alat agar berfungsi **mandiri tanpa SD**; update per-file via `/fs/upload` (plugin uploader tidak diperlukan lagi) |
-| **SD card — 4 GB** | `/dataset/` (sumber kebenaran), `predict_log.csv`, **backup model** | Data besar/tumbuh; backup model dipulihkan otomatis ke LittleFS saat boot |
-| **NVS** | Pengaturan kamera (23 parameter OV2640) | Kecil, sering dibaca, tahan restart |
-| **PSRAM — 8 MB OPI** | Frame buffer kamera 2×VGA, `rgbArena` 921 KB, buffer model ~315 KB | Buffer besar; bandwidth cukup untuk data gambar |
-| **SRAM internal — 512 KB** | **Tensor arena** (bila muat, otomatis fallback PSRAM) | Akses jauh lebih cepat dari PSRAM (bus OPI) → inferensi lebih singkat |
-
-**Model self-healing** — saat boot, salinan model di LittleFS dan SD disinkronkan dua arah:
-LittleFS kosong (mis. habis ditimpa plugin uploader) → dipulihkan dari SD; SD kosong/beda →
-di-backup dari LittleFS. Model praktis tidak bisa hilang kecuali keduanya dihapus.
-
-**Tensor arena dua-tahap** — interpreter dialokasikan dulu di PSRAM untuk mengukur
-kebutuhan arena yang sebenarnya (`arena_used_bytes`), lalu bila SRAM internal masih
-menyisakan ≥120 KB untuk WiFi + HTTP, interpreter dibangun ulang dengan arena
-pas-ukuran di SRAM. Lokasi arena terlihat di tab **⚙️ Sistem** dan `/model_info`.
-
----
-
 ## Preprocessing & Hasil Training
 
 <div align="center">
@@ -140,7 +116,6 @@ klasifikasiTelur_ESP32_S3_CAM/
 │   └── dataset/                         # Foto telur lokal (tidak di-track)
 └── EggClassifierV2/                   # ← Firmware utama
     ├── EggClassifierV2.ino
-    ├── partitions.csv                 # Layout flash 16MB dual-OTA (Partition Scheme: Custom)
     └── data/                          # LittleFS — web interface
         ├── index.html
         ├── app.js
@@ -165,24 +140,10 @@ klasifikasiTelur_ESP32_S3_CAM/
 |---|---|
 | Board | `ESP32S3 Dev Module` |
 | Flash Size | `16MB (128Mb)` |
-| **Partition Scheme** | **`Custom`** ← wajib; memakai [`EggClassifierV2/partitions.csv`](EggClassifierV2/partitions.csv) (16MB dual-OTA) |
+| **Partition Scheme** | **`Huge APP (3MB No OTA/1MB SPIFFS)`** ← wajib |
 | PSRAM | `OPI PSRAM` |
 | CPU Frequency | `240MHz` |
 | USB CDC On Boot | `Enabled` |
-
-> ℹ️ Menu "Default 16MB with spiffs" **tidak tersedia** untuk ESP32S3 Dev Module di
-> arduino-esp32 core 3.x — karena itu layout 16MB dual-OTA (app 2×6,25MB +
-> LittleFS 3,43MB) disertakan sebagai `partitions.csv` di folder sketch.
-> Core otomatis memprioritaskan file ini saat compile; pilihan menu **Custom**
-> membuat IDE melaporkan ukuran maksimum app yang benar.
-
-> ⚠️ **Ganti partition scheme = flash via USB sekali** dan seluruh isi flash terhapus
-> (LittleFS + NVS — pengaturan kamera kembali default; **SD card tidak tersentuh**).
-> Setelah boot pertama, buka `http://telur.local` → muncul **halaman pemulihan**
-> tertanam di firmware: upload `index.html`, `app.js`, `style.css` dari folder
-> `EggClassifierV2/data/` langsung dari browser. Model dipulihkan otomatis dari
-> backup SD. Setelah itu **semua update berikutnya lewat WiFi** (tab ⚙️ Sistem):
-> firmware via OTA, web UI via upload per-file — kabel USB tidak diperlukan lagi.
 
 ### 3. Set WiFi Credentials
 
@@ -192,30 +153,18 @@ Edit di `EggClassifierV2.ino`:
 #define WIFI_PASS  "password_wifi"
 ```
 
-### 4. Upload Firmware (USB — hanya pertama kali)
+### 4. Upload Web Interface ke LittleFS
+
+1. Install plugin **ESP32 Sketch Data Upload** untuk Arduino IDE 2.x:
+   - Download dari [lorol/arduino-esp32fs-plugin](https://github.com/lorol/arduino-esp32fs-plugin)
+   - Salin ke folder `tools/` di direktori Arduino
+2. Buka sketch `EggClassifierV2/EggClassifierV2.ino`
+3. **Tools → ESP32 Sketch Data Upload** → pilih LittleFS
+4. Tunggu sampai upload selesai
+
+### 5. Upload Firmware
 
 Klik **Upload (→)**, tunggu selesai, buka Serial Monitor 115200.
-
-### 5. Upload Web Interface ke LittleFS (via browser, tanpa plugin)
-
-Boot pertama LittleFS masih kosong — buka `http://telur.local`, firmware
-otomatis menampilkan **halaman pemulihan**: pilih `index.html`, `app.js`,
-`style.css` dari folder `EggClassifierV2/data/` → Upload → halaman dimuat ulang
-sebagai web UI lengkap.
-
-Update web UI selanjutnya: tab **⚙️ Sistem → Update Web UI** (atau dari terminal:
-`for f in EggClassifierV2/data/*; do curl -F "file=@$f" http://telur.local/fs/upload; done`).
-
-> Plugin "ESP32 Sketch Data Upload" tetap bisa dipakai, tapi **tidak disarankan** —
-> plugin menimpa seluruh partisi LittleFS. Kalaupun terlanjur, model dipulihkan
-> otomatis dari backup SD saat boot berikutnya.
-
-### 5b. Update Firmware Selanjutnya — OTA via Web (tanpa USB)
-
-1. Arduino IDE: **Sketch → Export Compiled Binary** (Ctrl+Alt+S)
-2. Web UI → tab **⚙️ Sistem → Update Firmware (OTA)** → pilih
-   `EggClassifierV2.ino.bin` (di `EggClassifierV2/build/esp32.esp32.esp32s3/`)
-3. Tunggu progress 100% → alat restart sendiri dengan firmware baru
 
 ### 6. Akses Web Interface
 
@@ -229,9 +178,9 @@ http://<IP_ADDRESS>      ← IP tampil di Serial Monitor
 
 Model dipasang dari tab **🚀 Training** (satu pintu):
 jalankan pipeline penuh, atau klik **"Pasang Model Ini ke Alat"** pada kartu
-Model Terakhir di GitHub. Board restart otomatis; model tersimpan di **LittleFS**
-(primer) dengan **backup otomatis di SD card** — keduanya saling memulihkan saat
-boot, sehingga model selamat dari upload ulang LittleFS maupun SD dicabut.
+Model Terakhir di GitHub. Board restart otomatis dan model tersimpan di **SD card**
+(fallback LittleFS bila SD tidak terpasang) — tahan terhadap upload ulang LittleFS
+yang menimpa seluruh partisi web.
 
 > Untuk model dari luar pipeline (mis. hasil Colab), gunakan endpoint langsung:
 > `curl -F "model=@egg_model.tflite" http://telur.local/upload_model`
@@ -302,17 +251,6 @@ tidak hilang saat alat dimatikan.
 > Balance, lalu gunakan setting yang sama saat mengumpulkan dataset dan prediksi.
 > Sensor yang konsisten = model yang akurat.
 
-### Tab Sistem — Monitor & Update via Web (`6`)
-
-Preview kamera dimatikan di tab ini. Empat kartu:
-
-| Kartu | Fungsi |
-|---|---|
-| **Memori & Penyimpanan** | Bar pemakaian SRAM internal, PSRAM, LittleFS, SD + info firmware, partisi, lokasi model & tensor arena, RSSI, uptime |
-| **Update Firmware (OTA)** | Upload `.ino.bin` lewat WiFi — tanpa kabel USB |
-| **Update Web UI** | Upload `index.html` / `app.js` / `style.css` ke LittleFS per-file — tanpa plugin |
-| **Log Prediksi** | Riwayat klasifikasi dari `predict_log.csv` di SD (waktu NTP WIB, label, skor, durasi) — unduh CSV untuk lampiran laporan, atau hapus |
-
 ---
 
 ## API Endpoints
@@ -323,7 +261,7 @@ Preview kamera dimatikan di tab ini. Empat kartu:
 | GET | `/capture` | JPEG frame live (untuk preview & download dataset) |
 | GET | `/predict` | Jalankan inferensi → JSON `{label, score, time_ms, good}` |
 | GET | `/model_info` | Status model `{loaded, size_kb, arena_kb}` |
-| POST | `/upload_model` | Upload file `.tflite` → LittleFS + backup SD → restart |
+| POST | `/upload_model` | Upload file `.tflite` → LittleFS → restart |
 | GET | `/sd/info` | Status SD `{mounted, good, bad, used_mb, total_mb}` |
 | POST | `/sd/capture?label=good\|bad` | Capture → simpan JPEG ke SD `/dataset/` |
 | GET | `/sd/list` | Daftar file dataset di SD (JSON) |
@@ -334,11 +272,6 @@ Preview kamera dimatikan di tab ini. Empat kartu:
 | GET | `/camera/get` | JSON semua parameter sensor OV2640 |
 | POST | `/camera/set?var=...&val=...` | Set parameter kamera → tersimpan di NVS |
 | POST | `/camera/reset` | Reset semua setting kamera → default pabrik (restart) |
-| GET | `/sys/info` | Statistik memori/penyimpanan/firmware (tab Sistem) |
-| POST | `/ota` | Update firmware via web (multipart `.bin`, butuh partisi dual-OTA) |
-| POST | `/fs/upload` | Upload file web UI ke LittleFS (pengganti plugin uploader) |
-| GET | `/log` | CSV log prediksi dari SD (`?tail=1` → 16 KB terakhir) |
-| POST | `/log/clear` | Hapus log prediksi |
 
 ---
 
@@ -432,8 +365,7 @@ lalu pasang model hasilnya via `curl -F "model=@egg_model.tflite" http://telur.l
 | Phase 4 | Training MobileNetV1 α=0.25 INT8 | ✅ DONE |
 | Phase 5 | EggClassifierV2 — firmware + web + dual-core | ✅ DONE |
 | Phase 6 | Optimasi RTOS + PSRAM — zero-alloc inference | ✅ DONE |
-| Phase 7 | Migrasi Freenove FNK0085 + SD card + pipeline training GitHub Actions | ✅ DONE |
-| Phase 8 | Maksimalkan N16R8: partisi dual-OTA 16MB, OTA via web, web UI tanpa plugin, model self-healing LittleFS↔SD, arena di SRAM, log prediksi SD | 🔄 Testing hardware |
+| Phase 7 | Migrasi Freenove FNK0085 + SD card + pipeline training GitHub Actions | 🔄 Testing hardware |
 
 ---
 

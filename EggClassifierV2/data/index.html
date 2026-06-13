@@ -50,9 +50,6 @@
     <button id="btn-camera" class="sb-item" onclick="switchTab('camera')" title="Kamera (5)">
       <span class="sb-ico">🎥</span><span class="sb-label">Kamera</span>
     </button>
-    <button id="btn-system" class="sb-item" onclick="switchTab('system')" title="Sistem (6)">
-      <span class="sb-ico">⚙️</span><span class="sb-label">Sistem</span>
-    </button>
   </nav>
 
   <div class="sb-foot">
@@ -77,7 +74,8 @@
     <!-- Kolom kiri-atas: kamera (sticky di desktop) -->
     <section id="cam-col">
       <div id="cam-wrap">
-        <img id="preview" src="/capture" alt="Live Preview"
+        <!-- src diisi previewLoop() di app.js — semua request lewat antrian -->
+        <img id="preview" alt="Live Preview"
              onerror="previewError()" style="min-height:120px">
 
         <div id="overlay-loading">
@@ -390,9 +388,8 @@
       <span id="model-status" class="badge-missing">Tidak ada model</span>
     </div>
     <p class="text-xs" style="color:var(--text-3)">
-      Model dipasang otomatis dari tab <b>🚀 Training</b> — tersimpan di alat
-      (LittleFS) dengan <b>backup otomatis di SD card</b>: saling memulihkan
-      saat boot, jadi model tidak hilang saat web UI diperbarui maupun SD dicabut.
+      Model dipasang otomatis dari tab <b>🚀 Training</b> dan tersimpan di
+      SD card — tidak hilang saat alat mati maupun saat web UI diperbarui.
     </p>
   </div>
 
@@ -430,78 +427,6 @@
   </div>
 
 </div><!-- /tab-camera -->
-
-<!-- ═══════════════ TAB SISTEM ═════════════════════════════ -->
-<div id="tab-system" class="hidden space-y-4">
-
-  <!-- Memori & penyimpanan -->
-  <div class="card p-4 space-y-3">
-    <div class="flex items-center justify-between">
-      <h3 class="text-sm font-semibold" style="color:var(--text-1)">Memori &amp; Penyimpanan</h3>
-      <div class="flex items-center gap-2">
-        <span class="text-xs" style="color:var(--text-3)">📵 kamera off</span>
-        <button class="btn-mini" onclick="loadSysInfo()">↻ Muat Ulang</button>
-      </div>
-    </div>
-    <div id="sys-meters" class="space-y-3">
-      <p class="text-xs text-center py-4" style="color:var(--text-3)">Memuat…</p>
-    </div>
-    <p id="sys-detail" class="text-xs" style="color:var(--text-3);line-height:1.7"></p>
-  </div>
-
-  <!-- OTA firmware -->
-  <div class="card p-4 space-y-2">
-    <h3 class="text-sm font-semibold" style="color:var(--text-1)">⚡ Update Firmware (OTA)</h3>
-    <p class="text-xs" style="color:var(--text-2)">
-      Firmware diperbarui lewat WiFi — <b>tanpa kabel USB</b>. Di Arduino IDE:
-      <b>Sketch → Export Compiled Binary</b>, lalu pilih file
-      <code style="color:var(--primary)">EggClassifierV2.ino.bin</code> di sini.
-      Butuh partisi dual-OTA (Partition Scheme: <b>Custom</b> + partitions.csv).
-    </p>
-    <input type="file" id="ota-file" accept=".bin" class="hidden" onchange="otaUpload(this)">
-    <button id="ota-btn" class="btn-upload" onclick="document.getElementById('ota-file').click()">
-      ⚡ &nbsp;Pilih File Firmware (.bin)
-    </button>
-    <div id="ota-progress" class="hidden space-y-1.5">
-      <div class="bar-track"><div id="ota-fill" class="bar-upload" style="width:0%"></div></div>
-      <p id="ota-status" class="text-xs text-center" style="color:var(--text-2)"></p>
-    </div>
-  </div>
-
-  <!-- Update Web UI -->
-  <div class="card p-4 space-y-2">
-    <h3 class="text-sm font-semibold" style="color:var(--text-1)">🖥️ Update Web UI</h3>
-    <p class="text-xs" style="color:var(--text-2)">
-      Upload <code>index.html</code>, <code>app.js</code>, <code>style.css</code>
-      (boleh sekaligus) langsung ke LittleFS — <b>tanpa plugin uploader</b>,
-      file lain & model tidak tersentuh.
-    </p>
-    <input type="file" id="ui-files" multiple accept=".html,.js,.css,.svg,.png,.ico"
-           class="hidden" onchange="uiUpload(this)">
-    <button class="btn-upload" onclick="document.getElementById('ui-files').click()">
-      🖥️ &nbsp;Pilih File Web UI
-    </button>
-    <p id="ui-status" class="text-xs text-center hidden" style="color:var(--text-2)"></p>
-  </div>
-
-  <!-- Log prediksi -->
-  <div class="card p-4 space-y-2">
-    <div class="flex items-center justify-between">
-      <h3 class="text-sm font-semibold" style="color:var(--text-1)">📋 Log Prediksi (SD)</h3>
-      <div class="flex gap-1.5">
-        <a class="btn-mini" href="/log" download="predict_log.csv" style="text-decoration:none">⬇ CSV</a>
-        <button class="btn-mini" onclick="loadPredictLog()">↻</button>
-        <button class="btn-mini" onclick="clearPredictLog()">🗑️</button>
-      </div>
-    </div>
-    <p class="text-xs" style="color:var(--text-3)">
-      Setiap klasifikasi otomatis tercatat ke <code>/predict_log.csv</code> di SD card
-      (waktu, label, skor, durasi) — siap jadi lampiran bukti pengujian laporan.
-    </p>
-    <div id="predict-log" class="log-box">Memuat…</div>
-  </div>
-
-</div><!-- /tab-system -->
 
     </section><!-- /content-col -->
 

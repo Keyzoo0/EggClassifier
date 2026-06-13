@@ -20,6 +20,64 @@ const dlCounts = {
 counts.good = dlCounts.good;
 counts.bad  = dlCounts.bad;
 
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// ─── Antrian request ke alat ─────────────────────────────────
+// WebServer di firmware sinkron: hanya melayani SATU koneksi pada satu
+// waktu — socket lain ditahan sampai 5 detik. Browser senang membuka
+// socket paralel (preview + tombol + galeri sekaligus), dan itulah yang
+// membuat web terasa macet. Solusi: SEMUA request ke alat lewat antrian
+// ini; maksimal satu berjalan, sisanya menunggu giliran di browser.
+// (Request ke api.github.com TIDAK lewat sini — beda server.)
+let espChain = Promise.resolve();
+
+function espQueue(job) {
+  const p = espChain.then(job, job);
+  espChain = p.then(() => {}, () => {});
+  return p;
+}
+
+const ESP_TIMEOUT_MS = 15000;   // satu request macet tak boleh membekukan UI
+
+function espFetch(url, opts, precheck) {
+  return espQueue(async () => {
+    if (precheck && !precheck()) throw new Error('dibatalkan');
+    // Timeout: bila alat tak merespons (mis. sedang restart), batalkan agar
+    // antrian lanjut ke request berikutnya, bukan menggantung selamanya
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), ESP_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, { ...(opts || {}), signal: ctrl.signal });
+      // Habiskan body DI DALAM antrian — request berikutnya baru jalan
+      // setelah transfer ini benar-benar selesai
+      const buf = await res.arrayBuffer();
+      return new Response(buf, { status: res.status, headers: res.headers });
+    } finally {
+      clearTimeout(timer);
+    }
+  });
+}
+
+// Muat gambar dari alat lewat antrian yang sama. img.src biasa membuat
+// browser membuka socket sendiri di luar antrian — di sini gambar
+// diambil sebagai blob lalu dipasang sebagai object URL.
+async function espImage(imgEl, url, precheck) {
+  const res = await espFetch(url, undefined, precheck);
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  const blob = await res.blob();
+  const old  = imgEl.dataset.blobUrl || '';
+  const u    = URL.createObjectURL(blob);
+  imgEl.src  = u;
+  imgEl.dataset.blobUrl = u;
+  if (old) URL.revokeObjectURL(old);
+}
+
+function revokeBlobImgs(container) {
+  container.querySelectorAll('img').forEach(i => {
+    if (i.dataset.blobUrl) URL.revokeObjectURL(i.dataset.blobUrl);
+  });
+}
+
 // ─── Score Chart (Chart.js donut) ────────────────────────────
 function initChart() {
   const ctx = document.getElementById('score-chart').getContext('2d');
@@ -52,40 +110,47 @@ function updateChart(score, isGood) {
 }
 
 // ─── Tab switching ────────────────────────────────────────────
-// Tab tanpa preview kamera: polling stop + kolom kamera disembunyikan,
-// konten pakai seluruh lebar — hemat bandwidth ESP32 (server single-thread)
-const NO_CAM_TABS = ['manage', 'training', 'system'];
-
 function switchTab(tab) {
   activeTab = tab;
-  ['dataset', 'manage', 'training', 'predict', 'camera', 'system'].forEach(t => {
+  ['dataset', 'manage', 'training', 'predict', 'camera'].forEach(t => {
     document.getElementById('tab-' + t).classList.toggle('hidden', t !== tab);
     document.getElementById('btn-' + t).classList.toggle('active', t === tab);
   });
-  document.getElementById('workspace').classList.toggle('no-cam', NO_CAM_TABS.includes(tab));
+  // Tab Kelola & Training: preview kamera dimatikan (polling stop + kolom
+  // kamera disembunyikan, konten pakai seluruh lebar)
+  const camOff = (tab === 'manage' || tab === 'training');
+  document.getElementById('workspace').classList.toggle('no-cam', camOff);
   if (tab === 'predict' && !scoreChart) initChart();
   if (tab === 'camera' && !camLoaded) loadCamSettings();
   if (tab === 'manage') loadDatasetManager();
   if (tab === 'training') loadSDInfo();   // refresh angka dataset
-  if (tab === 'system') { loadSysInfo(); loadPredictLog(); }
 }
 
-// ─── Live Preview ─────────────────────────────────────────────
-function refreshPreview() {
-  // Kamera off di tab Kelola, Training & Sistem
-  if (isClassifying || NO_CAM_TABS.includes(activeTab)) return;
-  const tmp = new Image();
-  tmp.onload = () => {
-    document.getElementById('preview').src = tmp.src;
-    document.getElementById('frame-count').textContent = ++frameCount;
-    if (!previewOk) {
-      previewOk = true;
-      document.getElementById('overlay-loading').style.display = 'none';
+// ─── Live Preview — self-paced ────────────────────────────────
+// Bukan setInterval: frame berikutnya baru diminta setelah frame
+// sebelumnya benar-benar selesai, jadi koneksi tidak pernah menumpuk
+// saat link lambat (frame rate menyesuaikan sendiri). Berhenti saat
+// tab browser disembunyikan atau kamera off (Kelola/Training).
+async function previewLoop() {
+  const img = document.getElementById('preview');
+  while (true) {
+    const camOff = isClassifying || activeTab === 'manage' || activeTab === 'training';
+    if (document.hidden || camOff) { await sleep(350); continue; }
+
+    const t0 = Date.now();
+    try {
+      await espImage(img, '/capture?t=' + Date.now());
+      document.getElementById('frame-count').textContent = ++frameCount;
+      if (!previewOk) {
+        previewOk = true;
+        document.getElementById('overlay-loading').style.display = 'none';
+      }
       setWifi(true);
+    } catch (_) {
+      if (previewOk) setWifi(false);
     }
-  };
-  tmp.onerror = () => { if (previewOk) setWifi(false); };
-  tmp.src = '/capture?t=' + Date.now();
+    await sleep(Math.max(PREVIEW_MS - (Date.now() - t0), 200));
+  }
 }
 
 function previewError() { setWifi(false); }
@@ -106,7 +171,7 @@ function setWifi(ok) {
   }
 }
 
-setInterval(refreshPreview, PREVIEW_MS);
+previewLoop();
 
 // ─── Dataset: capture → SD card (fallback: download ke PC) ───
 let sdMounted = false;
@@ -120,7 +185,7 @@ async function captureImage(label) {
   try {
     if (sdMounted) {
       // Mode SD: foto disimpan langsung di alat
-      const res  = await fetch('/sd/capture?label=' + label, { method: 'POST' });
+      const res  = await espFetch('/sd/capture?label=' + label, { method: 'POST' });
       const data = await res.json();
       if (data.error) throw new Error(data.error);
 
@@ -136,7 +201,7 @@ async function captureImage(label) {
       );
     } else {
       // Mode download: perilaku lama (tanpa SD card)
-      const res = await fetch('/capture?t=' + Date.now());
+      const res = await espFetch('/capture?t=' + Date.now());
       if (!res.ok) throw new Error('Camera gagal (' + res.status + ')');
       const blob = await res.blob();
 
@@ -177,7 +242,7 @@ async function loadSDInfo() {
   const title = document.getElementById('storage-mode-title');
   const desc  = document.getElementById('storage-mode-desc');
   try {
-    const res  = await fetch('/sd/info');
+    const res  = await espFetch('/sd/info');
     const data = await res.json();
     sdMounted  = !!data.mounted;
 
@@ -230,22 +295,23 @@ function addThumb(label, n, src) {
   const empty = document.getElementById('thumb-empty');
   empty.classList.add('hidden');
 
-  const img = new Image();
-  img.onload = () => {
-    const wrap  = document.createElement('div');
-    wrap.className = 'thumb';
-    const imgEl = document.createElement('img');
-    imgEl.src = img.src;
-    imgEl.alt = label;
-    const lbl = document.createElement('div');
-    lbl.className = 'thumb-label ' + (label === 'good' ? 'thumb-label-good' : 'thumb-label-bad');
-    lbl.textContent = '#' + n;
-    wrap.appendChild(imgEl);
-    wrap.appendChild(lbl);
+  const wrap  = document.createElement('div');
+  wrap.className = 'thumb';
+  const imgEl = document.createElement('img');
+  imgEl.alt = label;
+  const lbl = document.createElement('div');
+  lbl.className = 'thumb-label ' + (label === 'good' ? 'thumb-label-good' : 'thumb-label-bad');
+  lbl.textContent = '#' + n;
+  wrap.appendChild(imgEl);
+  wrap.appendChild(lbl);
+
+  espImage(imgEl, src || ('/capture?t=' + Date.now())).then(() => {
     grid.insertBefore(wrap, grid.firstChild);
-    while (grid.children.length > 6) grid.removeChild(grid.lastChild);
-  };
-  img.src = src || ('/capture?t=' + Date.now());
+    while (grid.children.length > 6) {
+      revokeBlobImgs(grid.lastChild);
+      grid.removeChild(grid.lastChild);
+    }
+  }).catch(() => {});
 }
 
 // ─── Predict ──────────────────────────────────────────────────
@@ -262,7 +328,7 @@ async function runPredict() {
   document.getElementById('busy-badge').classList.remove('hidden');
 
   try {
-    const res  = await fetch('/predict?t=' + Date.now());
+    const res  = await espFetch('/predict?t=' + Date.now());
     const data = await res.json();
 
     if (data.error) {
@@ -366,7 +432,7 @@ function addHistory(data) {
 // ─── Model: info + upload ─────────────────────────────────────
 async function loadModelInfo() {
   try {
-    const res  = await fetch('/model_info');
+    const res  = await espFetch('/model_info');
     const data = await res.json();
     const el   = document.getElementById('model-status');
     const warn = document.getElementById('no-model-warning');
@@ -395,7 +461,7 @@ async function waitForRestart(maxWait = 15000) {
   const t0 = Date.now();
   await new Promise(r => setTimeout(r, 2500));
   while (Date.now() - t0 < maxWait) {
-    try { await fetch('/capture?t=' + Date.now()); return; }
+    try { await espFetch('/capture?t=' + Date.now()); return; }
     catch (_) { await new Promise(r => setTimeout(r, 800)); }
   }
 }
@@ -408,11 +474,13 @@ const DS_BATCH = 24;          // foto per "muat lebih banyak"
 let dsFiles  = [];            // [{n: nama, s: size}]
 let dsFilter = 'all';
 let dsShown  = 0;
+let dsGen    = 0;             // naik tiap render ulang — pembatalan antrian
+                              // gambar tile yang sudah tidak relevan
 
 async function loadDatasetManager() {
   const empty = document.getElementById('ds-empty');
   try {
-    const res  = await fetch('/sd/list');
+    const res  = await espFetch('/sd/list');
     const data = await res.json();
     if (data.error) {
       dsFiles = [];
@@ -449,7 +517,12 @@ function dsRender(reset) {
   const more  = document.getElementById('ds-more');
   const list  = dsFiltered();
 
-  if (reset) { grid.innerHTML = ''; dsShown = 0; }
+  if (reset) {
+    dsGen++;                  // batalkan muatan gambar tile yang masih antre
+    revokeBlobImgs(grid);
+    grid.innerHTML = '';
+    dsShown = 0;
+  }
 
   const slice = list.slice(dsShown, dsShown + DS_BATCH);
   slice.forEach(f => grid.appendChild(dsTile(f)));
@@ -476,10 +549,13 @@ function dsTile(f) {
   el.id = 'ds-' + f.n;
 
   const img = document.createElement('img');
-  img.loading = 'lazy';
-  img.src = '/sd/file?name=' + encodeURIComponent(f.n);
   img.alt = f.n;
-  img.onclick = () => window.open(img.src, '_blank');
+  const fileUrl = '/sd/file?name=' + encodeURIComponent(f.n);
+  // Muat lewat antrian (berurutan, tidak membanjiri alat); batal otomatis
+  // bila galeri sudah dirender ulang sebelum gilirannya tiba
+  const gen = dsGen;
+  espImage(img, fileUrl, () => gen === dsGen && img.isConnected).catch(() => {});
+  img.onclick = () => window.open(fileUrl, '_blank');
   el.appendChild(img);
 
   const badge = document.createElement('div');
@@ -511,11 +587,12 @@ function dsTile(f) {
 async function dsDelete(name) {
   if (!confirm('Hapus ' + name + ' dari SD card?')) return;
   try {
-    const res  = await fetch('/sd/delete?name=' + encodeURIComponent(name), { method: 'POST' });
+    const res  = await espFetch('/sd/delete?name=' + encodeURIComponent(name), { method: 'POST' });
     const data = await res.json();
     if (data.error) throw new Error(data.error);
     dsFiles = dsFiles.filter(f => f.n !== name);
-    document.getElementById('ds-' + name)?.remove();
+    const tile = document.getElementById('ds-' + name);
+    if (tile) { revokeBlobImgs(tile); tile.remove(); }
     dsRender(false);
     loadSDInfo();
     showToast('🗑️ ' + name + ' dihapus', 'good');
@@ -526,7 +603,7 @@ async function dsDelete(name) {
 
 async function dsRelabel(name) {
   try {
-    const res  = await fetch('/sd/relabel?name=' + encodeURIComponent(name), { method: 'POST' });
+    const res  = await espFetch('/sd/relabel?name=' + encodeURIComponent(name), { method: 'POST' });
     const data = await res.json();
     if (data.error) throw new Error(data.error);
     const f = dsFiles.find(x => x.n === name);
@@ -561,7 +638,7 @@ async function dsUploadFiles(input) {
     try {
       const fd = new FormData();
       fd.append('photo', files[i]);
-      const res  = await fetch('/sd/upload?label=' + dsUploadLabel, { method: 'POST', body: fd });
+      const res  = await espFetch('/sd/upload?label=' + dsUploadLabel, { method: 'POST', body: fd });
       const data = await res.json();
       if (data.error) throw new Error(data.error);
       dsFiles.unshift({ n: data.file, s: files[i].size });
@@ -670,7 +747,7 @@ async function syncDataset() {
     repoFiles.set(f.name, { sha: f.sha, size: f.size }));
   else if (lsRes.status !== 404) throw new Error('Gagal baca repo (' + lsRes.status + ')');
 
-  const sdRes  = await fetch('/sd/list');
+  const sdRes  = await espFetch('/sd/list');
   const sdList = await sdRes.json();
   if (sdList.error) throw new Error('SD: ' + sdList.error);
   const sdNames = new Set(sdList.map(f => f.n));
@@ -687,7 +764,7 @@ async function syncDataset() {
   let done = 0;
 
   for (const f of toUpload) {
-    const img = await fetch('/sd/file?name=' + encodeURIComponent(f.n));
+    const img = await espFetch('/sd/file?name=' + encodeURIComponent(f.n));
     if (!img.ok) throw new Error('Gagal baca ' + f.n + ' dari SD');
     const b64 = await blobToBase64(await img.blob());
 
@@ -798,7 +875,8 @@ async function installModelToDevice(blob, onProgress) {
   const fd = new FormData();
   fd.append('model', blob, 'egg_model.tflite');
 
-  const result = await new Promise((resolve, reject) => {
+  // XHR (demi progress-bar upload) — tetap lewat antrian alat
+  const result = await espQueue(() => new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.upload.onprogress = e => {
       if (e.lengthComputable && onProgress)
@@ -811,7 +889,7 @@ async function installModelToDevice(blob, onProgress) {
     xhr.onerror = () => reject(new Error('Network error ke ESP32'));
     xhr.open('POST', '/upload_model');
     xhr.send(fd);
-  });
+  }));
 
   if (!result.ok) throw new Error('Upload ke alat gagal: ' + (result.error || '?'));
   await waitForRestart();
@@ -992,7 +1070,7 @@ function updateCamDeps() {
 
 async function camSet(id, val) {
   try {
-    const res  = await fetch('/camera/set?var=' + id + '&val=' + val, { method: 'POST' });
+    const res  = await espFetch('/camera/set?var=' + id + '&val=' + val, { method: 'POST' });
     const data = await res.json();
     if (data.error) throw new Error(data.error);
     updateCamDeps();
@@ -1078,7 +1156,7 @@ function renderCamSettings(values) {
 async function loadCamSettings() {
   const box = document.getElementById('cam-settings');
   try {
-    const res  = await fetch('/camera/get');
+    const res  = await espFetch('/camera/get');
     const data = await res.json();
     if (data.error) throw new Error(data.error);
     renderCamSettings(data);
@@ -1092,7 +1170,7 @@ async function loadCamSettings() {
 async function resetCamSettings() {
   if (!confirm('Reset semua pengaturan kamera ke default pabrik?\nAlat akan restart.')) return;
   try {
-    await fetch('/camera/reset', { method: 'POST' });
+    await espFetch('/camera/reset', { method: 'POST' });
     showToast('Reset! Menunggu alat restart…', 'good');
     camLoaded = false;
     await waitForRestart();
@@ -1100,167 +1178,6 @@ async function resetCamSettings() {
     showToast('✅ Kamera kembali ke default', 'good');
   } catch (e) {
     showToast('Error: ' + e.message, 'error');
-  }
-}
-
-// ═══════════════════════════════════════════════════════════
-//  SISTEM — statistik memori, OTA firmware, update web UI,
-//  dan log prediksi (CSV di SD card)
-// ═══════════════════════════════════════════════════════════
-function sysBar(label, used, total, unit) {
-  const pct = total ? Math.min(100, used / total * 100) : 0;
-  return '<div class="space-y-1">' +
-    '<div class="flex justify-between items-baseline">' +
-      '<span class="text-xs font-semibold" style="color:var(--text-2)">' + label + '</span>' +
-      '<span class="text-xs font-mono" style="color:var(--text-3)">' +
-        used + ' / ' + total + ' ' + unit + '</span>' +
-    '</div>' +
-    '<div class="bar-track"><div class="bar-upload" style="width:' +
-      pct.toFixed(1) + '%"></div></div>' +
-    '</div>';
-}
-
-async function loadSysInfo() {
-  const box = document.getElementById('sys-meters');
-  try {
-    const res = await fetch('/sys/info?t=' + Date.now());
-    const d   = await res.json();
-    box.innerHTML =
-      sysBar('SRAM internal terpakai', d.heap_total_kb - d.heap_kb, d.heap_total_kb, 'KB') +
-      sysBar('PSRAM terpakai', d.psram_kb - d.psram_free_kb, d.psram_kb, 'KB') +
-      sysBar('LittleFS — web UI + model', d.lfs_used_kb, d.lfs_kb, 'KB') +
-      sysBar('SD card — dataset + log', d.sd_used_mb, d.sd_mb, 'MB');
-    document.getElementById('sys-detail').innerHTML =
-      'Firmware <b>v' + d.fw + '</b> (' + d.built + ') · partisi <b>' + d.part + '</b> · OTA: ' +
-      (d.ota ? '<b style="color:var(--success)">siap</b>'
-             : '<b style="color:var(--warn)">tidak tersedia — pilih Partition Scheme: Custom lalu flash USB sekali</b>') +
-      '<br>Model dari <b>' + d.model_loc + '</b> · tensor arena di <b>' +
-      (d.arena_loc === 'sram' ? 'SRAM internal ⚡' : 'PSRAM') + '</b>' +
-      '<br>WiFi ' + d.rssi + ' dBm · uptime ' + Math.floor(d.uptime_s / 60) + ' mnt · ' +
-      'SRAM terendah ' + d.heap_min_kb + ' KB bebas';
-  } catch (e) {
-    box.innerHTML = '<p class="text-xs text-center py-4" style="color:var(--danger)">' +
-                    'Gagal memuat: ' + e.message + '</p>';
-  }
-}
-
-// ─── OTA firmware via web — tanpa kabel USB ──────────────────
-async function otaUpload(input) {
-  const file = input.files[0];
-  input.value = '';
-  if (!file) return;
-  if (!/\.bin$/i.test(file.name)) { showToast('Pilih file .bin hasil Export Compiled Binary', 'error'); return; }
-  if (!confirm('Flash firmware "' + file.name + '" (' + Math.round(file.size / 1024) +
-               ' KB) ke alat?\nAlat akan restart setelah selesai.')) return;
-
-  const prog = document.getElementById('ota-progress');
-  const stat = document.getElementById('ota-status');
-  const btn  = document.getElementById('ota-btn');
-  prog.classList.remove('hidden');
-  btn.disabled = true;
-
-  try {
-    const fd = new FormData();
-    fd.append('firmware', file);
-    const result = await new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      xhr.upload.onprogress = e => {
-        if (e.lengthComputable) {
-          const p = Math.round(e.loaded / e.total * 100);
-          document.getElementById('ota-fill').style.width = p + '%';
-          stat.textContent = 'Mengirim firmware… ' + p + '% — jangan matikan alat!';
-        }
-      };
-      xhr.onload  = () => {
-        try { resolve(JSON.parse(xhr.responseText)); }
-        catch { resolve({ ok: false, error: 'respons tidak valid' }); }
-      };
-      xhr.onerror = () => reject(new Error('koneksi ke alat terputus'));
-      xhr.open('POST', '/ota');
-      xhr.send(fd);
-    });
-    if (!result.ok) throw new Error(result.error || '?');
-
-    stat.textContent = '✅ Sukses! Alat restart dengan firmware baru…';
-    showToast('✅ OTA sukses — alat restart', 'good');
-    await waitForRestart(25000);
-    loadSysInfo();
-    loadModelInfo();
-  } catch (e) {
-    stat.textContent = '❌ ' + e.message;
-    showToast('OTA gagal: ' + e.message, 'error');
-  } finally {
-    btn.disabled = false;
-  }
-}
-
-// ─── Update file web UI → LittleFS (pengganti plugin uploader) ─
-async function uiUpload(input) {
-  const files = [...input.files];
-  input.value = '';
-  if (!files.length) return;
-
-  const stat = document.getElementById('ui-status');
-  stat.classList.remove('hidden');
-  let ok = 0;
-
-  for (let i = 0; i < files.length; i++) {
-    stat.textContent = 'Upload ' + (i + 1) + '/' + files.length + ': ' + files[i].name;
-    try {
-      const fd = new FormData();
-      fd.append('file', files[i]);
-      const res  = await fetch('/fs/upload', { method: 'POST', body: fd });
-      const data = await res.json();
-      if (!data.ok) throw new Error(data.error || res.status);
-      ok++;
-    } catch (e) {
-      showToast(files[i].name + ' gagal: ' + e.message, 'error');
-    }
-  }
-
-  stat.textContent = '✅ ' + ok + '/' + files.length + ' file terpasang';
-  loadSysInfo();
-  if (ok && files.some(f => /\.(html|js|css)$/i.test(f.name))) {
-    showToast('✅ Web UI diperbarui — memuat ulang…', 'good');
-    setTimeout(() => location.reload(), 1200);
-  }
-}
-
-// ─── Log prediksi dari SD card ───────────────────────────────
-async function loadPredictLog() {
-  const box = document.getElementById('predict-log');
-  try {
-    const res = await fetch('/log?tail=1&t=' + Date.now());
-    if (res.status === 404) { box.textContent = 'Belum ada prediksi tercatat.'; return; }
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const lines = (await res.text()).trim().split('\n')
-      .filter(l => l.includes(',') && !l.startsWith('waktu,'));
-    if (!lines.length) { box.textContent = 'Belum ada prediksi tercatat.'; return; }
-
-    box.innerHTML = lines.slice(-50).reverse().map(l => {
-      const c    = l.split(',');
-      const good = c[1] === 'BAGUS';
-      return '<div class="log-row">' +
-        '<span style="color:var(--text-3)">' + c[0] + '</span>' +
-        '<span style="font-weight:700;color:' +
-          (good ? 'var(--success)' : 'var(--danger)') + '">' + c[1] + '</span>' +
-        '<span class="font-mono">' + (parseFloat(c[2]) * 100).toFixed(1) + '%</span>' +
-        '<span style="color:var(--text-3)">' + c[3] + ' ms</span>' +
-        '</div>';
-    }).join('');
-  } catch (e) {
-    box.textContent = 'Gagal memuat log: ' + e.message;
-  }
-}
-
-async function clearPredictLog() {
-  if (!confirm('Hapus seluruh log prediksi di SD card?')) return;
-  try {
-    await fetch('/log/clear', { method: 'POST' });
-    loadPredictLog();
-    showToast('🗑️ Log prediksi dihapus', 'good');
-  } catch (e) {
-    showToast('Gagal: ' + e.message, 'error');
   }
 }
 
@@ -1280,7 +1197,7 @@ if (localStorage.getItem('sb_collapsed') === '1') {
 loadModelInfo();
 updateCounters();
 loadSDInfo();
-setInterval(loadSDInfo, 30000);
+setInterval(() => { if (!document.hidden) loadSDInfo(); }, 30000);
 
 // ─── Toast ────────────────────────────────────────────────────
 function showToast(msg, type) {
@@ -1308,5 +1225,4 @@ document.addEventListener('keydown', e => {
   if (k === '3') switchTab('training');
   if (k === '4') switchTab('predict');
   if (k === '5') switchTab('camera');
-  if (k === '6') switchTab('system');
 });
