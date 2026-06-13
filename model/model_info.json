@@ -1,9 +1,9 @@
 {
   "val_accuracy": 1.0,
   "size_kb": 315.5,
-  "n_good": 7,
-  "n_bad": 7,
+  "n_good": 10,
+  "n_bad": 10,
   "alpha": 0.25,
   "img_size": 96,
-  "trained_at": "2026-06-12 17:56 UTC"
+  "trained_at": "2026-06-13 00:31 UTC"
 }
