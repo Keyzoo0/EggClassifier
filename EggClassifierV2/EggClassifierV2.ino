@@ -391,18 +391,35 @@ void handleCamReset() {
 // yang menimpa seluruh partisi); LittleFS hanya fallback tanpa SD.
 // ─────────────────────────────────────────────────────────────
 #define MODEL_PATH "/egg_model.tflite"
+#define MIN_MODEL_SIZE 1024   // file < 1KB pasti bukan .tflite valid (mis. 0 byte
+                              //   sisa deploy gagal) — jangan dicoba dimuat
 static fs::FS& modelFS() { return sdMounted ? (fs::FS&)SD_MMC : (fs::FS&)LittleFS; }
 
-bool initTFLite() {
+// Buka model dari satu FS hanya bila ukurannya wajar (bukan kosong/rusak)
+static File openValidModel(fs::FS& fs, const char* label) {
   File f;
-  if (sdMounted && SD_MMC.exists(MODEL_PATH)) {
-    f = SD_MMC.open(MODEL_PATH, "r");
-    Serial.println("[TF] Model dari SD card");
-  } else if (LittleFS.exists(MODEL_PATH)) {
-    f = LittleFS.open(MODEL_PATH, "r");
-    Serial.println("[TF] Model dari LittleFS");
-  } else {
-    Serial.println("[TF] Tidak ada model (SD/LittleFS)");
+  if (!fs.exists(MODEL_PATH)) return f;
+  f = fs.open(MODEL_PATH, "r");
+  if (f && f.size() >= MIN_MODEL_SIZE) {
+    Serial.printf("[TF] Model dari %s (%u KB)\n", label, (unsigned)(f.size() / 1024));
+    return f;
+  }
+  Serial.printf("[TF] Model di %s kosong/rusak (%u B) — dilewati\n",
+                label, (unsigned)(f ? f.size() : 0));
+  if (f) f.close();
+  return File();
+}
+
+bool initTFLite() {
+  // SD dulu (sumber utama), jatuh ke LittleFS bila SD kosong/rusak/tak ada.
+  // File 0-byte di SD tidak lagi menutupi model valid di LittleFS.
+  File f;
+  if (sdMounted) f = openValidModel(SD_MMC, "SD card");
+  if (!f)        f = openValidModel(LittleFS, "LittleFS");
+  if (!f) {
+    Serial.println("[TF] Tidak ada model valid (SD/LittleFS) — pasang via tab Training");
+    snprintf(tfliteErrReporter.last, sizeof(tfliteErrReporter.last),
+             "model belum dipasang / file kosong");
     return false;
   }
   size_t sz = f.size();
@@ -935,6 +952,15 @@ void handleUploadDone() {
   }
   File f  = modelFS().open(MODEL_PATH, "r");
   size_t sz = f.size(); f.close();
+
+  // Tolak file kosong/terlalu kecil (mis. unduhan model gagal) — JANGAN restart
+  // dengan model rusak; hapus agar tidak menutupi model lama yang valid.
+  if (sz < MIN_MODEL_SIZE) {
+    modelFS().remove(MODEL_PATH);
+    Serial.printf("[UPLOAD] Ditolak: model hanya %u B (rusak)\n", (unsigned)sz);
+    server.send(400, "application/json", "{\"ok\":false,\"error\":\"model_too_small\"}");
+    return;
+  }
 
   char resp[96];
   snprintf(resp, sizeof(resp),
