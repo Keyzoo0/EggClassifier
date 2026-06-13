@@ -1051,14 +1051,16 @@ void setup() {
   );
   Serial.println("[OK] Inference task → Core 0 (prio 5)");
 
-  // 7. WiFi — biarkan power-save DEFAULT (modem sleep ON). Mematikannya bikin
-  //    radio full-power terus + lonjakan arus saat kamera aktif → pada catu USB
-  //    yang pas-pasan, brownout → paket IP hilang (device "connect" tapi tak
-  //    bisa dijangkau). Reconnect pakai auto bawaan stack.
+  // 7. WiFi — kombinasi yang menang: modem sleep OFF (RTT cepat, tanpa tunggu
+  //    DTIM ~100ms tiap round-trip → throughput naik) DIGABUNG TX power rendah
+  //    (lonjakan arus TX kecil → tidak brownout). Brownout dulu terjadi karena
+  //    sleep-off DENGAN TX power PENUH; di sini TX sudah 13dBm. setSleep(false)
+  //    dipasang di GOT_IP (setelah terhubung, bukan saat asosiasi).
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
   WiFi.onEvent([](WiFiEvent_t event) {
     if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
+      WiFi.setSleep(false);   // radio nyala terus → tak ada jeda DTIM per paket
       Serial.printf("[WiFi] IP: %s\n", WiFi.localIP().toString().c_str());
       // IP DHCP bisa berubah antar boot — umumkan ulang telur.local
       MDNS.end();
