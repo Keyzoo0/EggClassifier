@@ -724,17 +724,39 @@ void handleSDUploadDone() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// HTTP: file dari LittleFS
+// HTTP: file statik dari LittleFS (web UI di-host di alat, tanpa CDN)
+// Satu handler generik (dipasang sebagai onNotFound) menyajikan semua
+// aset — index.html, app.js, style.css, tw.css, chart.min.js — jadi
+// menambah file UI baru tidak perlu ubah firmware.
 // ─────────────────────────────────────────────────────────────
-void serveFile(const char* path, const char* mime) {
+static const char* mimeFor(const String& p) {
+  if (p.endsWith(".html")) return "text/html";
+  if (p.endsWith(".js"))   return "application/javascript";
+  if (p.endsWith(".css"))  return "text/css";
+  if (p.endsWith(".json")) return "application/json";
+  if (p.endsWith(".svg"))  return "image/svg+xml";
+  if (p.endsWith(".png"))  return "image/png";
+  if (p.endsWith(".jpg") || p.endsWith(".jpeg")) return "image/jpeg";
+  if (p.endsWith(".ico"))  return "image/x-icon";
+  return "application/octet-stream";
+}
+
+void handleStatic() {
+  String path = server.uri();
+  if (path == "/") path = "/index.html";
+  if (path.indexOf("..") >= 0) { server.send(400, "text/plain", "bad path"); return; }
   if (!LittleFS.exists(path)) { server.send(404, "text/plain", "Not found"); return; }
+
+  // chart.min.js = vendor besar & stabil → boleh di-cache lama browser
+  // (load berikutnya instan). File UI lain TIDAK di-cache agar perubahan
+  // langsung terlihat setelah upload ulang LittleFS.
+  if (path == "/chart.min.js") server.sendHeader("Cache-Control", "max-age=604800, immutable");
+  else                         server.sendHeader("Cache-Control", "no-cache");
+
   File f = LittleFS.open(path, "r");
-  server.streamFile(f, mime);
+  server.streamFile(f, mimeFor(path));
   f.close();
 }
-void handleRoot()  { serveFile("/index.html", "text/html"); }
-void handleAppJS() { serveFile("/app.js",     "application/javascript"); }
-void handleCSS()   { serveFile("/style.css",  "text/css"); }
 
 // ─────────────────────────────────────────────────────────────
 // HTTP: capture JPEG live — dipakai preview & download dataset
@@ -1021,11 +1043,7 @@ void setup() {
     Serial.println("\n[WARN] WiFi gagal — retry otomatis berjeda 5 dtk");
   }
 
-  // 8. Routes HTTP
-  server.on("/",             HTTP_GET,  handleRoot);
-  server.on("/index.html",   HTTP_GET,  handleRoot);
-  server.on("/app.js",       HTTP_GET,  handleAppJS);
-  server.on("/style.css",    HTTP_GET,  handleCSS);
+  // 8. Routes HTTP — aset statik (/, *.html, *.js, *.css) lewat onNotFound
   server.on("/capture",      HTTP_GET,  handleCapture);
   server.on("/predict",      HTTP_GET,  handlePredict);
   server.on("/model_info",   HTTP_GET,  handleModelInfo);
@@ -1040,6 +1058,7 @@ void setup() {
   server.on("/camera/get",   HTTP_GET,  handleCamGet);
   server.on("/camera/set",   HTTP_POST, handleCamSet);
   server.on("/camera/reset", HTTP_POST, handleCamReset);
+  server.onNotFound(handleStatic);   // aset web UI dari LittleFS
   server.begin();
 
   Serial.println("[OK] HTTP server\n");

@@ -79,7 +79,27 @@ function revokeBlobImgs(container) {
 }
 
 // ─── Score Chart (Chart.js donut) ────────────────────────────
-function initChart() {
+// Chart.js (~205 KB) di-host di alat tapi di-lazy-load: hanya diunduh saat
+// tab Prediksi pertama kali dibuka, jadi tidak membebani load awal halaman.
+let chartJsPromise = null;
+function ensureChartJs() {
+  if (window.Chart) return Promise.resolve();
+  if (!chartJsPromise) {
+    chartJsPromise = new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = '/chart.min.js';
+      s.onload = resolve;
+      s.onerror = () => { chartJsPromise = null; reject(new Error('chart.min.js gagal dimuat')); };
+      document.head.appendChild(s);
+    });
+  }
+  return chartJsPromise;
+}
+
+async function initChart() {
+  if (scoreChart) return;
+  await ensureChartJs();
+  if (scoreChart) return;   // bisa keburu dibuat saat menunggu skrip
   const ctx = document.getElementById('score-chart').getContext('2d');
   scoreChart = new Chart(ctx, {
     type: 'doughnut',
@@ -317,7 +337,7 @@ function addThumb(label, n, src) {
 // ─── Predict ──────────────────────────────────────────────────
 async function runPredict() {
   if (isClassifying) return;
-  if (!scoreChart) initChart();
+  await initChart();   // pastikan Chart.js termuat sebelum updateChart
   isClassifying = true;
 
   const btn = document.getElementById('predict-btn');

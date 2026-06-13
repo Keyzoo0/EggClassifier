@@ -6,18 +6,11 @@
   <title>Egg Classifier — ESP32-S3</title>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='80' font-size='80'>🥚</text></svg>">
 
-  <!-- Inter font — Google Fonts -->
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
-
-  <!-- Tailwind CSS -->
-  <script src="https://cdn.tailwindcss.com"></script>
-
-  <!-- Chart.js — untuk donut skor -->
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-
-  <!-- Custom styles -->
+  <!-- Semua di-host di alat (LittleFS) — TANPA dependency internet supaya
+       halaman tampil cepat lewat LAN. Font: system stack (lihat style.css).
+       Tailwind: build purged ~8KB (bukan Play CDN 400KB + JIT).
+       Chart.js: di-lazy-load app.js hanya saat tab Prediksi dibuka. -->
+  <link rel="stylesheet" href="/tw.css">
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>

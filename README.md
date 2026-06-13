@@ -116,11 +116,19 @@ klasifikasiTelur_ESP32_S3_CAM/
 │   └── dataset/                         # Foto telur lokal (tidak di-track)
 └── EggClassifierV2/                   # ← Firmware utama
     ├── EggClassifierV2.ino
-    └── data/                          # LittleFS — web interface
+    └── data/                          # LittleFS — web interface (di-host di alat, TANPA CDN)
         ├── index.html
         ├── app.js
-        └── style.css
+        ├── style.css
+        ├── tw.css                     # Tailwind purged ~8KB (ganti Play CDN 400KB+JIT)
+        └── chart.min.js              # Chart.js lokal — lazy-load saat tab Prediksi
 ```
+
+> **Web tampil cepat tanpa internet:** semua aset (CSS, JS, font) di-host di
+> LittleFS, bukan dari CDN. Tailwind dipakai sebagai build purged (`tw.css`),
+> bukan Play CDN yang berat. Regenerasi `tw.css` bila menambah class Tailwind baru:
+> jalankan `EggClassifierV2/web-build/build.sh` (scan index.html + app.js → `data/tw.css`).
+> Chart.js di-lazy-load hanya saat tab Prediksi.
 
 ---
 
