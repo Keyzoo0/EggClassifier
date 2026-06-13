@@ -1207,6 +1207,11 @@ void setup() {
     Serial.println("\n[WARN] WiFi gagal connect — stack auto-reconnect jalan terus");
   }
 
+  // Catatan: dicoba arahkan alokasi WebServer ke PSRAM (heap_caps_malloc_extmem_
+  // enable) — terukur TIDAK ada bedanya (heap internal ~193KB tetap, loop 333Hz),
+  // karena alokasi WebServer cuma beberapa KB sesaat. PSRAM lebih lambat & bisa
+  // perlambat stack jaringan, jadi alokasi dibiarkan di RAM internal yang cepat.
+
   // 8. Routes HTTP — aset statik (/, *.html, *.js, *.css) lewat onNotFound
   server.on("/capture",      HTTP_GET,  handleCapture);
   server.on("/predict",      HTTP_GET,  handlePredict);
