@@ -52,6 +52,8 @@
  *   GET  /camera/get    → JSON semua parameter sensor OV2640
  *   POST /camera/set    → ?var=brightness&val=1 → set + simpan ke NVS
  *   POST /camera/reset  → hapus setting custom → restart (default pabrik)
+ *   GET  /flash/get     → JSON status flash: {on, bri}
+ *   POST /flash/set     → ?on=1&bri=200 → flash kamera (8 LED RGB GPIO47)
  */
 
 #include <WiFi.h>
@@ -70,6 +72,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
+#include <Adafruit_NeoPixel.h>   // flash kamera: 8 LED RGB di GPIO47
 
 // ── Credentials ───────────────────────────────────────────────
 #define WIFI_SSID  "ROSI1"
@@ -96,6 +99,10 @@
 // ── Pin Board ─────────────────────────────────────────────────
 #define RGB_LED_PIN 48  // WS2812 onboard: biru kedip=WiFi connecting, hijau=OK
 #define BOOT_BTN     0
+
+// ── Flash kamera — strip 8 LED WS2812 RGB di GPIO47 ──────────
+#define FLASH_PIN   47
+#define FLASH_NUM    8
 
 // ── Pin SD card (SDMMC 1-bit, fixed di PCB Freenove) ─────────
 #define SD_PIN_CMD  38
@@ -217,6 +224,56 @@ void updateLED() {
       blinkOn   = !blinkOn;
       neopixelWrite(RGB_LED_PIN, 0, 0, blinkOn ? 32 : 0);  // biru kedip
     }
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Flash kamera — strip 8 LED WS2812 RGB di GPIO47 (penerangan)
+//   On = semua LED putih pada tingkat kecerahan flashBri (0–255).
+//   Kecerahan tinggi = arus besar (8×~60mA bisa ~480mA penuh) →
+//   bisa memicu brownout; default sedang. Kecerahan disimpan di NVS.
+// ─────────────────────────────────────────────────────────────
+Adafruit_NeoPixel flashStrip(FLASH_NUM, FLASH_PIN, NEO_GRB + NEO_KHZ800);
+bool    flashOn  = false;
+uint8_t flashBri = 96;   // 0–255
+
+void applyFlash() {
+  flashStrip.setBrightness(flashBri);
+  uint32_t c = flashOn ? flashStrip.Color(255, 255, 255) : 0;
+  for (int i = 0; i < FLASH_NUM; i++) flashStrip.setPixelColor(i, c);
+  flashStrip.show();
+}
+
+// Isi LED satu per satu dengan satu warna (efek wipe)
+void flashColorWipe(uint32_t color, int wait) {
+  for (int i = 0; i < FLASH_NUM; i++) {
+    flashStrip.setPixelColor(i, color);
+    flashStrip.show();
+    delay(wait);
+  }
+}
+
+// Animasi awal setup: colorWipe merah → hijau → biru, lalu mati
+void flashBootIntro() {
+  flashStrip.setBrightness(50);   // 50 cukup terang & tidak menyilaukan
+  flashColorWipe(flashStrip.Color(255, 0, 0), 50);   // merah
+  flashColorWipe(flashStrip.Color(0, 255, 0), 50);   // hijau
+  flashColorWipe(flashStrip.Color(0, 0, 255), 50);   // biru
+  flashStrip.clear();
+  flashStrip.show();
+}
+
+// Tanda setup selesai: kedip putih 2× sebelum masuk loop
+void flashBootReady() {
+  flashStrip.setBrightness(60);
+  for (int k = 0; k < 2; k++) {
+    for (int i = 0; i < FLASH_NUM; i++)
+      flashStrip.setPixelColor(i, flashStrip.Color(255, 255, 255));
+    flashStrip.show();
+    delay(150);
+    flashStrip.clear();
+    flashStrip.show();
+    delay(150);
   }
 }
 
@@ -384,6 +441,33 @@ void handleCamReset() {
   vTaskDelay(pdMS_TO_TICKS(500));
   Serial.println("[INFO] Camera setting direset, restart...");
   ESP.restart();
+}
+
+// ─────────────────────────────────────────────────────────────
+// HTTP: flash kamera — status & set on/off + kecerahan
+//   GET  /flash/get               → {on, bri}
+//   POST /flash/set?on=1&bri=200  → set (kedua arg opsional)
+// Kecerahan disimpan permanen (NVS), status on/off TIDAK (default off
+// saat boot agar tidak langsung menarik arus besar).
+// ─────────────────────────────────────────────────────────────
+void handleFlashGet() {
+  char resp[48];
+  snprintf(resp, sizeof(resp), "{\"on\":%s,\"bri\":%d}",
+           flashOn ? "true" : "false", flashBri);
+  server.send(200, "application/json", resp);
+}
+
+void handleFlashSet() {
+  if (server.hasArg("on"))  flashOn = (server.arg("on").toInt() != 0);
+  if (server.hasArg("bri")) {
+    int b = server.arg("bri").toInt();
+    flashBri = b < 0 ? 0 : (b > 255 ? 255 : b);
+    camPrefs.begin("camcfg", false);
+    camPrefs.putUChar("flbri", flashBri);   // kecerahan persisten
+    camPrefs.end();
+  }
+  applyFlash();
+  handleFlashGet();
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1009,6 +1093,14 @@ void setup() {
   pinMode(BOOT_BTN, INPUT_PULLUP);
   neopixelWrite(RGB_LED_PIN, 0, 0, 0);
 
+  // Flash kamera: init strip + animasi awal (colorWipe merah→hijau→biru)
+  flashStrip.begin();
+  flashBootIntro();
+  camPrefs.begin("camcfg", true);
+  if (camPrefs.isKey("flbri")) flashBri = camPrefs.getUChar("flbri", flashBri);
+  camPrefs.end();
+  flashOn = false;   // strip dikendalikan web; mati dulu (kedip putih di akhir setup)
+
   // 1. LittleFS
   if (!LittleFS.begin(true)) { Serial.println("[ERROR] LittleFS gagal"); return; }
   Serial.println("[OK] LittleFS");
@@ -1100,6 +1192,8 @@ void setup() {
   server.on("/camera/get",   HTTP_GET,  handleCamGet);
   server.on("/camera/set",   HTTP_POST, handleCamSet);
   server.on("/camera/reset", HTTP_POST, handleCamReset);
+  server.on("/flash/get",    HTTP_GET,  handleFlashGet);
+  server.on("/flash/set",    HTTP_POST, handleFlashSet);
   server.onNotFound(handleStatic);   // aset web UI dari LittleFS
   server.begin();
 
@@ -1116,6 +1210,11 @@ void setup() {
   Serial.printf( "║  Dataset: %-28s║\n",
     sdMounted ? "SD card (/dataset)" : "Download mode (SD tidak ada)");
   Serial.println("╚══════════════════════════════════════╝\n");
+
+  // Setup selesai → kedip putih 2× sebagai tanda siap, lalu kembalikan
+  // strip ke kendali web (mati, kecerahan dari NVS), baru masuk loop().
+  flashBootReady();
+  applyFlash();
 }
 
 // ─────────────────────────────────────────────────────────────

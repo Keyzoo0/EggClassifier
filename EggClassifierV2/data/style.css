@@ -203,6 +203,31 @@ body { margin: 0; }
   padding: 2px 10px;
 }
 
+/* ── Tombol Flash kamera ──────────────────────────────────── */
+.flash-toggle {
+  position: absolute;
+  bottom: 8px;
+  left: 8px;
+  background: rgba(0,0,0,0.65);
+  backdrop-filter: blur(6px);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 999px;
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-1);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.flash-toggle:hover { border-color: rgba(255,255,255,0.25); }
+/* Status menyala — amber, dipakai tombol di kamera & di tab Kamera */
+.flash-on {
+  background: linear-gradient(135deg,#f59e0b,#fbbf24) !important;
+  border-color: #fcd34d !important;
+  color: #1a1a1a !important;
+  box-shadow: 0 0 14px rgba(251,191,36,0.5);
+}
+
 /* ── Glass card ───────────────────────────────────────────── */
 .card {
   background: var(--bg-card);

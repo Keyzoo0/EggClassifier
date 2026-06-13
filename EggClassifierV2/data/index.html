@@ -85,6 +85,9 @@
             ⏳ Analisis...
           </span>
         </div>
+
+        <!-- Tombol Flash (8 LED RGB GPIO47) — tampil di tab Dataset/Prediksi/Kamera -->
+        <button id="flash-btn" class="flash-toggle" onclick="toggleFlash()">⚡ Flash OFF</button>
       </div>
     </section>
 
@@ -401,6 +404,25 @@
       <b>Auto White Balance</b>, lalu pakai setting yang sama saat mengumpulkan
       dataset <i>dan</i> prediksi.
     </p>
+  </div>
+
+  <!-- Flash kamera: on/off + slider kecerahan -->
+  <div class="card p-4 space-y-3">
+    <div class="flex items-center justify-between">
+      <h3 class="text-sm font-semibold" style="color:var(--text-1)">⚡ Flash Kamera</h3>
+      <button id="flash-btn2" class="btn-mini" onclick="toggleFlash()">OFF</button>
+    </div>
+    <div class="setting-row">
+      <div class="setting-label">
+        Kecerahan
+        <span class="setting-hint">8 LED RGB di GPIO47 — terlalu terang bisa bikin alat brownout</span>
+      </div>
+      <div class="setting-ctl flex items-center gap-2">
+        <input type="range" id="flash-bri" class="range" min="0" max="255" value="96"
+               oninput="flashBriPreview(this.value)" onchange="setFlashBri(this.value)">
+        <span id="flash-bri-val" class="range-value">96</span>
+      </div>
+    </div>
   </div>
 
   <!-- Kontrol — digenerate oleh app.js dari CAM_SCHEMA -->

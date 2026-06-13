@@ -1213,10 +1213,72 @@ if (localStorage.getItem('sb_collapsed') === '1') {
   document.getElementById('sb-toggle-ico').textContent = '⏵';
 }
 
+// ─── Flash kamera (8 NeoPixel GPIO47) ─────────────────────────
+// Tombol on/off ada di area kamera (tab Dataset/Prediksi/Kamera) dan di
+// tab Kamera; slider kecerahan hanya di tab Kamera. Semua sinkron.
+let flashState = { on: false, bri: 96 };
+
+function renderFlash() {
+  const b1 = document.getElementById('flash-btn');
+  if (b1) {
+    b1.textContent = '⚡ Flash ' + (flashState.on ? 'ON' : 'OFF');
+    b1.classList.toggle('flash-on', flashState.on);
+  }
+  const b2 = document.getElementById('flash-btn2');
+  if (b2) {
+    b2.textContent = flashState.on ? 'ON' : 'OFF';
+    b2.classList.toggle('flash-on', flashState.on);
+  }
+  const sl = document.getElementById('flash-bri');
+  if (sl) sl.value = flashState.bri;
+  const sv = document.getElementById('flash-bri-val');
+  if (sv) sv.textContent = flashState.bri;
+}
+
+async function loadFlash() {
+  try {
+    const res = await espFetch('/flash/get');
+    const d = await res.json();
+    flashState.on = !!d.on; flashState.bri = d.bri;
+    renderFlash();
+  } catch (_) {}
+}
+
+async function flashApply() {
+  try {
+    const res = await espFetch(
+      '/flash/set?on=' + (flashState.on ? 1 : 0) + '&bri=' + flashState.bri,
+      { method: 'POST' });
+    const d = await res.json();
+    flashState.on = !!d.on; flashState.bri = d.bri;
+    renderFlash();
+  } catch (e) {
+    showToast('Flash gagal: ' + e.message, 'error');
+  }
+}
+
+function toggleFlash() {
+  flashState.on = !flashState.on;
+  renderFlash();        // umpan balik instan
+  flashApply();
+}
+
+function flashBriPreview(v) {          // saat geser slider (belum lepas)
+  flashState.bri = parseInt(v) || 0;
+  const sv = document.getElementById('flash-bri-val');
+  if (sv) sv.textContent = flashState.bri;
+}
+
+function setFlashBri(v) {               // saat slider dilepas → kirim ke alat
+  flashState.bri = parseInt(v) || 0;
+  flashApply();
+}
+
 // ─── Init ─────────────────────────────────────────────────────
 loadModelInfo();
 updateCounters();
 loadSDInfo();
+loadFlash();
 setInterval(() => { if (!document.hidden) loadSDInfo(); }, 30000);
 
 // ─── Toast ────────────────────────────────────────────────────
