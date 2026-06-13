@@ -22,12 +22,13 @@
  *   Core 1 (prio 1) — loop(): WebServer.handleClient + LED + SD I/O
  *
  * PRIORITAS #1 — web lancar diakses client:
- *   - WiFi modem sleep OFF (default ON: tiap request tertahan 100–500 ms
- *     menunggu radio bangun; terukur ping 167 ms avg → ~5 ms setelah OFF)
- *   - Reconnect berjeda ≥5 dtk di loop(), bukan beruntun di event handler
- *   - mDNS diumumkan ulang tiap dapat IP (IP DHCP bisa berubah)
+ *   - WiFi modem sleep OFF, dipasang SETELAH dapat IP (bukan saat asosiasi —
+ *     mematikan power-save saat kamera aktif bisa gagalkan koneksi). Terukur
+ *     ping 167 ms avg → ~5 ms setelah OFF
+ *   - Reconnect pakai auto bawaan stack (teruji), mDNS diumumkan ulang tiap IP
  *   - WebServer sinkron hanya melayani SATU koneksi pada satu waktu —
  *     web UI (app.js) mengantre semua request agar tidak saling menahan
+ *   - Model dimuat sebelum kamera agar buffer model dapat PSRAM tak terfragmentasi
  *
  * PSRAM layout (~1.4 MB dari 8 MB tersedia):
  *   rgbArena    640×480×3 = 921 KB  — decode JPEG→RGB888 (pre-alokasi)
@@ -175,10 +176,6 @@ static uint8_t* rgbArena = nullptr;
 
 // Dual-core sync: inferensi di Core 0, HTTP di Core 1
 volatile bool classifying = false;
-
-// WiFi reconnect berjeda — flag di-set event handler, eksekusi di loop()
-static volatile bool wifiNeedReconnect = false;
-static uint32_t      wifiRetryMs       = 0;
 
 struct InferResult {
   float    score;
@@ -412,7 +409,18 @@ bool initTFLite() {
   modelSizeKB = sz / 1024;
 
   uint8_t* buf = (uint8_t*) ps_malloc(sz);
-  if (!buf) { f.close(); Serial.println("[TF] ps_malloc model gagal"); return false; }
+  if (!buf) {
+    f.close();
+    // Ungkap penyebab: kalau 'minta' wajar (~315KB) tapi 'alloc-maks' kecil →
+    // PSRAM terfragmentasi (load model setelah kamera). Kalau 'minta' raksasa →
+    // file model di SD rusak/ukuran salah.
+    snprintf(tfliteErrReporter.last, sizeof(tfliteErrReporter.last),
+             "ps_malloc %uKB gagal (PSRAM bebas %uKB, blok-maks %uKB)",
+             (unsigned)(sz / 1024), (unsigned)(ESP.getFreePsram() / 1024),
+             (unsigned)(ESP.getMaxAllocPsram() / 1024));
+    Serial.printf("[TF] %s\n", tfliteErrReporter.last);
+    return false;
+  }
   f.read(buf, sz);
   f.close();
 
@@ -981,18 +989,10 @@ void setup() {
   // 2. SD card (opsional — tanpa SD, dataset jatuh ke mode download)
   sdMounted = initSD();
 
-  // 3. Kamera — VGA double-buffer, tidak pernah berganti resolusi
-  //    (Freenove: kamera selalu berdaya, tanpa AXP313A)
-  if (!initCamera()) return;
-  loadCameraSettings();   // terapkan setting custom tersimpan di NVS
-
-  // 4. Pre-alokasi PSRAM decode buffer (921 KB) — zero malloc/free saat inferensi
-  rgbArena = (uint8_t*) ps_malloc((size_t)RGB_MAX_W * RGB_MAX_H * 3);
-  if (!rgbArena) { Serial.println("[ERROR] ps_malloc rgbArena gagal"); return; }
-  Serial.printf("[OK] rgbArena: %d KB di PSRAM\n",
-    (int)((size_t)RGB_MAX_W * RGB_MAX_H * 3 / 1024));
-
-  // 5. TFLite ops (registrasi satu kali sebelum load model)
+  // 3. TFLite — muat model DULU (sebelum kamera) agar buffer model + arena
+  //    dapat blok PSRAM yang masih segar. Bila dialokasikan setelah kamera +
+  //    rgbArena, PSRAM bisa terfragmentasi → ps_malloc model gagal walau total
+  //    bebas masih banyak.
   resolver.AddConv2D();
   resolver.AddDepthwiseConv2D();
   resolver.AddAveragePool2D();
@@ -1005,6 +1005,17 @@ void setup() {
   resolver.AddDequantize();
   initTFLite();
 
+  // 4. Kamera — VGA double-buffer, tidak pernah berganti resolusi
+  //    (Freenove: kamera selalu berdaya, tanpa AXP313A)
+  if (!initCamera()) return;
+  loadCameraSettings();   // terapkan setting custom tersimpan di NVS
+
+  // 5. Pre-alokasi PSRAM decode buffer (921 KB) — zero malloc/free saat inferensi
+  rgbArena = (uint8_t*) ps_malloc((size_t)RGB_MAX_W * RGB_MAX_H * 3);
+  if (!rgbArena) { Serial.println("[ERROR] ps_malloc rgbArena gagal"); return; }
+  Serial.printf("[OK] rgbArena: %d KB di PSRAM\n",
+    (int)((size_t)RGB_MAX_W * RGB_MAX_H * 3 / 1024));
+
   // 6. Dual-core: semaphore + inference task di Core 0 (prio 5)
   inferTrigSem = xSemaphoreCreateBinary();
   inferDoneSem = xSemaphoreCreateBinary();
@@ -1013,25 +1024,26 @@ void setup() {
   );
   Serial.println("[OK] Inference task → Core 0 (prio 5)");
 
-  // 7. WiFi — prioritas #1: web selalu lancar diakses client
+  // 7. WiFi — prioritas #1: web lancar diakses client
+  //    setSleep(false) dipasang SETELAH dapat IP (di event GOT_IP), BUKAN saat
+  //    asosiasi: mematikan power-save saat kamera aktif menarik arus bisa bikin
+  //    lonjakan daya yang menggagalkan koneksi. Reconnect pakai auto bawaan
+  //    stack (teruji, ada backoff) — tidak perlu logika manual.
   WiFi.mode(WIFI_STA);
-  WiFi.setAutoReconnect(false);   // reconnect diatur sendiri (berjeda ≥5 dtk)
+  WiFi.setAutoReconnect(true);
   WiFi.onEvent([](WiFiEvent_t event) {
     if (event == ARDUINO_EVENT_WIFI_STA_GOT_IP) {
-      wifiNeedReconnect = false;
+      WiFi.setSleep(false);   // modem sleep OFF setelah terhubung → request HTTP
+                              // tidak tertahan menunggu radio bangun (±150ms)
       Serial.printf("[WiFi] IP: %s\n", WiFi.localIP().toString().c_str());
       // IP DHCP bisa berubah antar boot — umumkan ulang telur.local
       MDNS.end();
       if (MDNS.begin("telur")) Serial.println("[WiFi] mDNS: http://telur.local");
-    } else if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
-      wifiNeedReconnect = true;   // jangan reconnect di sini — bisa beruntun
     }
   });
   WiFi.begin(WIFI_SSID, WIFI_PASS);
-  WiFi.setSleep(false);   // modem sleep OFF — default ON membuat tiap request
-                          // HTTP tertahan 100–500 ms menunggu radio bangun
   Serial.printf("[..] Connecting to '%s'", WIFI_SSID);
-  for (int t = 0; t < 60 && WiFi.status() != WL_CONNECTED; t++) {
+  for (int t = 0; t < 80 && WiFi.status() != WL_CONNECTED; t++) {
     vTaskDelay(pdMS_TO_TICKS(250));
     updateLED();
     if (t % 2 == 0) Serial.print(".");
@@ -1040,7 +1052,7 @@ void setup() {
     Serial.printf("\n[OK] WiFi: http://%s\n", WiFi.localIP().toString().c_str());
     neopixelWrite(RGB_LED_PIN, 0, 12, 0);
   } else {
-    Serial.println("\n[WARN] WiFi gagal — retry otomatis berjeda 5 dtk");
+    Serial.println("\n[WARN] WiFi gagal connect — stack auto-reconnect jalan terus");
   }
 
   // 8. Routes HTTP — aset statik (/, *.html, *.js, *.css) lewat onNotFound
@@ -1077,17 +1089,9 @@ void setup() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Loop — Core 1: WebServer + LED. WiFi reconnect via event handler.
+// Loop — Core 1: WebServer + LED. WiFi (re)connect ditangani stack.
 // ─────────────────────────────────────────────────────────────
 void loop() {
   server.handleClient();
   updateLED();
-
-  // Reconnect WiFi berjeda — di loop, bukan di event handler, agar stack
-  // WiFi tidak sibuk reconnect beruntun sampai HTTP tak terlayani
-  if (wifiNeedReconnect && millis() - wifiRetryMs >= 5000) {
-    wifiRetryMs = millis();
-    Serial.println("[WiFi] Reconnect...");
-    WiFi.reconnect();
-  }
 }
