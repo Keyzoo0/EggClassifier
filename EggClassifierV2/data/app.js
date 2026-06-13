@@ -136,10 +136,9 @@ function switchTab(tab) {
     document.getElementById('tab-' + t).classList.toggle('hidden', t !== tab);
     document.getElementById('btn-' + t).classList.toggle('active', t === tab);
   });
-  // Tab Kelola & Training: preview kamera dimatikan (polling stop + kolom
-  // kamera disembunyikan, konten pakai seluruh lebar)
-  const camOff = (tab === 'manage' || tab === 'training');
-  document.getElementById('workspace').classList.toggle('no-cam', camOff);
+  // Kamera dibiarkan NYALA TERUS di semua tab (start/stop tiap ganti tab berat).
+  // Kolom kamera tidak pernah disembunyikan.
+  document.getElementById('workspace').classList.remove('no-cam');
   if (tab === 'predict' && !scoreChart) initChart();
   if (tab === 'camera' && !camLoaded) loadCamSettings();
   if (tab === 'manage') loadDatasetManager();
@@ -149,13 +148,14 @@ function switchTab(tab) {
 // ─── Live Preview — self-paced ────────────────────────────────
 // Bukan setInterval: frame berikutnya baru diminta setelah frame
 // sebelumnya benar-benar selesai, jadi koneksi tidak pernah menumpuk
-// saat link lambat (frame rate menyesuaikan sendiri). Berhenti saat
-// tab browser disembunyikan atau kamera off (Kelola/Training).
+// saat link lambat (frame rate menyesuaikan sendiri).
+// Kamera NYALA TERUS di semua tab — start/stop saat ganti tab terbukti berat,
+// jadi preview tidak pernah dihentikan. Hanya jeda saat klasifikasi (kamera
+// dipakai inferensi) atau saat tab browser disembunyikan.
 async function previewLoop() {
   const img = document.getElementById('preview');
   while (true) {
-    const camOff = isClassifying || activeTab === 'manage' || activeTab === 'training';
-    if (document.hidden || camOff) { await sleep(350); continue; }
+    if (document.hidden || isClassifying) { await sleep(350); continue; }
 
     const t0 = Date.now();
     try {
