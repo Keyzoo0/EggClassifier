@@ -76,8 +76,8 @@
 #include <Adafruit_NeoPixel.h>   // flash kamera: 8 LED RGB di GPIO47
 
 // ── Credentials ───────────────────────────────────────────────
-#define WIFI_SSID  "ROSI1"
-#define WIFI_PASS  "20517420"
+#define WIFI_SSID  "telur"
+#define WIFI_PASS  "12345678"
 
 // ── Pin Camera — Freenove FNK0085 (profil ESP32S3_EYE) ───────
 #define CAM_PWDN   -1
@@ -115,12 +115,11 @@
 #define ARENA_SIZE (200 * 1024)   // 200 KB dari PSRAM
 
 // ── Kamera & Inferensi ────────────────────────────────────────
-// Camera QVGA (320×240) — model hanya 96×96, jadi VGA = pemborosan murni:
-// frame JPEG VGA ~35KB memblokir server sinkron lama saat dikirim, dan butuh
-// rgbArena 900KB. QVGA: frame ~10KB (preview gesit, server tak lama terblokir),
-// rgbArena 230KB, decode lebih cepat. Tetap di-scale nearest-neighbor → 96×96.
-#define RGB_MAX_W  320
-#define RGB_MAX_H  240
+// Camera VGA 640×480 kualitas tinggi (link via hotspot sudah kencang + server
+// async non-blocking, jadi frame besar tak masalah). rgbArena 900KB di PSRAM
+// (bebas 7.9MB). Frame di-scale nearest-neighbor → 96×96 untuk model.
+#define RGB_MAX_W  640
+#define RGB_MAX_H  480
 #define CROP_SZ     96
 
 // ── Global ────────────────────────────────────────────────────
@@ -257,46 +256,54 @@ void applyFlash() {
   flashStrip.show();
 }
 
-// Animasi boot: colorWipe merah→hijau→biru BERULANG selama setup berjalan,
-// dijalankan di task terpisah agar terus berputar walau setup memblokir
-// (mis. nunggu WiFi). Berhenti saat bootAnimRun=false.
-volatile bool       bootAnimRun    = true;
-TaskHandle_t        bootAnimHandle = NULL;
-
-void bootAnimTask(void* pv) {
-  flashStrip.setBrightness(50);   // 50 cukup terang & tidak menyilaukan
-  const uint32_t cols[3] = {
-    flashStrip.Color(255, 0, 0), flashStrip.Color(0, 255, 0), flashStrip.Color(0, 0, 255),
-  };
-  int ci = 0;
-  while (bootAnimRun) {
-    for (int i = 0; i < FLASH_NUM && bootAnimRun; i++) {
-      flashStrip.setPixelColor(i, cols[ci]);
-      flashStrip.show();
-      vTaskDelay(pdMS_TO_TICKS(45));
-    }
-    flashStrip.clear();
-    flashStrip.show();
-    vTaskDelay(pdMS_TO_TICKS(40));
-    ci = (ci + 1) % 3;
-  }
-  flashStrip.clear();
-  flashStrip.show();
-  bootAnimHandle = NULL;
-  vTaskDelete(NULL);
-}
-
-// Tanda setup selesai: kedip putih 2× sebelum masuk loop
-void flashBootReady() {
+// Kedip putih 2× — tanda WiFi baru tersambung
+void flashBlinkWhite() {
   flashStrip.setBrightness(60);
   for (int k = 0; k < 2; k++) {
     for (int i = 0; i < FLASH_NUM; i++)
       flashStrip.setPixelColor(i, flashStrip.Color(255, 255, 255));
     flashStrip.show();
-    delay(150);
+    vTaskDelay(pdMS_TO_TICKS(150));
     flashStrip.clear();
     flashStrip.show();
-    delay(150);
+    vTaskDelay(pdMS_TO_TICKS(150));
+  }
+}
+
+// Indikator flash MENGIKUTI STATUS WiFi (bukan setup/loop), berjalan seumur
+// hidup di task sendiri:
+//   - WiFi belum/putus  → colorWipe merah→hijau→biru BERULANG
+//   - baru tersambung   → kedip putih 2×, lalu strip diserahkan ke kendali web
+//   - putus lagi        → colorWipe lagi (otomatis)
+TaskHandle_t wifiFlashHandle = NULL;
+
+void wifiFlashTask(void* pv) {
+  const uint32_t cols[3] = {
+    flashStrip.Color(255, 0, 0), flashStrip.Color(0, 255, 0), flashStrip.Color(0, 0, 255),
+  };
+  int  ci        = 0;
+  bool wasConn   = false;
+  while (true) {
+    if (WiFi.status() == WL_CONNECTED) {
+      if (!wasConn) {                 // transisi: baru tersambung
+        flashBlinkWhite();
+        applyFlash();                 // kembalikan strip ke kendali web (mati/NVS)
+        wasConn = true;
+      }
+      vTaskDelay(pdMS_TO_TICKS(200)); // idle saat connect — web yang pegang strip
+    } else {                          // connecting / putus → colorWipe berputar
+      wasConn = false;
+      flashStrip.setBrightness(50);
+      for (int i = 0; i < FLASH_NUM && WiFi.status() != WL_CONNECTED; i++) {
+        flashStrip.setPixelColor(i, cols[ci]);
+        flashStrip.show();
+        vTaskDelay(pdMS_TO_TICKS(45));
+      }
+      flashStrip.clear();
+      flashStrip.show();
+      vTaskDelay(pdMS_TO_TICKS(40));
+      ci = (ci + 1) % 3;
+    }
   }
 }
 
@@ -321,8 +328,8 @@ bool initCamera() {
   cfg.xclk_freq_hz = 20000000;
   cfg.pixel_format = PIXFORMAT_JPEG;
   cfg.grab_mode    = CAMERA_GRAB_LATEST;  // selalu ambil frame terbaru
-  cfg.frame_size   = FRAMESIZE_QVGA;      // 320×240 — cukup utk model 96×96
-  cfg.jpeg_quality = 12;  // 0=terbaik; q12 di QVGA → frame ~8-10KB (preview gesit)
+  cfg.frame_size   = FRAMESIZE_VGA;       // 640×480 kualitas tinggi
+  cfg.jpeg_quality = 6;   // 0=terbaik; q6 = kualitas tinggi (link hotspot kencang)
   cfg.fb_count     = 2;                   // double-buffer di PSRAM
   cfg.fb_location  = CAMERA_FB_IN_PSRAM;
 
@@ -336,7 +343,7 @@ bool initCamera() {
     s->set_contrast(s, 1);
     s->set_awb_gain(s, 1);
   }
-  Serial.println("[OK] Camera: QVGA 320×240 JPEG double-buffer PSRAM");
+  Serial.println("[OK] Camera: VGA 640×480 JPEG q6 double-buffer PSRAM");
   return true;
 }
 
@@ -1110,15 +1117,14 @@ void setup() {
   pinMode(BOOT_BTN, INPUT_PULLUP);
   neopixelWrite(RGB_LED_PIN, 0, 0, 0);
 
-  // Flash kamera: init strip + jalankan animasi boot BERULANG di task terpisah
-  // (colorWipe berputar terus selama setup, mis. saat nunggu WiFi)
+  // Flash kamera: init strip + ambil kecerahan NVS, lalu jalankan task indikator
+  // WiFi (colorWipe saat connecting/putus, kedip putih saat tersambung).
   flashStrip.begin();
-  bootAnimRun = true;
-  xTaskCreatePinnedToCore(bootAnimTask, "bootAnim", 2560, NULL, 1, &bootAnimHandle, 1);
   camPrefs.begin("camcfg", true);
   if (camPrefs.isKey("flbri")) flashBri = camPrefs.getUChar("flbri", flashBri);
   camPrefs.end();
-  flashOn = false;   // strip dikendalikan web; mati dulu (kedip putih di akhir setup)
+  flashOn = false;   // strip dikendalikan web saat WiFi tersambung
+  xTaskCreatePinnedToCore(wifiFlashTask, "wifiFlash", 2560, NULL, 1, &wifiFlashHandle, 1);
 
   // 1. LittleFS
   if (!LittleFS.begin(true)) { Serial.println("[ERROR] LittleFS gagal"); return; }
@@ -1251,14 +1257,7 @@ void setup() {
   Serial.printf( "║  Dataset: %-28s║\n",
     sdMounted ? "SD card (/dataset)" : "Download mode (SD tidak ada)");
   Serial.println("╚══════════════════════════════════════╝\n");
-
-  // Setup selesai → hentikan animasi loop, tunggu task berhenti (agar tidak
-  // rebutan strip), lalu kedip putih 2× sebagai tanda siap, kembalikan strip
-  // ke kendali web (mati, kecerahan NVS), baru masuk loop().
-  bootAnimRun = false;
-  while (bootAnimHandle) vTaskDelay(pdMS_TO_TICKS(10));
-  flashBootReady();
-  applyFlash();
+  // Indikator flash (colorWipe/kedip) ditangani wifiFlashTask sesuai status WiFi.
 }
 
 // ─────────────────────────────────────────────────────────────
