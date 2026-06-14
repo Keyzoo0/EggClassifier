@@ -760,76 +760,62 @@ function trainStatus(msg, pct) {
   if (pct !== undefined) document.getElementById('train-fill').style.width = pct + '%';
 }
 
-// ─── Step 1: sinkron dataset SD → repo GitHub ────────────────
-// SD card = sumber kebenaran: foto baru di-upload, foto yang sudah
-// dihapus/dipindah label di SD ikut dihapus dari repo.
+// ─── Step 1: sinkron dataset SD → repo GitHub (WIPE + REUPLOAD) ──
+// Strategi bersih total: HAPUS semua dataset di repo, lalu UPLOAD ULANG
+// semua dari SD. Lebih lambat tapi anti-conflict — tak ada update in-place
+// yang butuh sha cocok (sumber bug 409/422 di versi diff sebelumnya).
 async function syncDataset() {
-  // Isi repo saat ini (nama → sha+size; sha perlu untuk update/delete)
+  // 1. Daftar semua file dataset di repo (nama → sha)
   const repoFiles = new Map();
   const lsRes = await gh('/contents/dataset?ref=' + ghCfg.branch);
-  if (lsRes.ok) (await lsRes.json()).forEach(f =>
-    repoFiles.set(f.name, { sha: f.sha, size: f.size }));
+  if (lsRes.ok) (await lsRes.json()).forEach(f => repoFiles.set(f.name, f.sha));
   else if (lsRes.status !== 404) throw new Error('Gagal baca repo (' + lsRes.status + ')');
 
+  // 2. Daftar semua file dataset di SD
   const sdRes  = await espFetch('/sd/list');
   const sdList = await sdRes.json();
   if (sdList.error) throw new Error('SD: ' + sdList.error);
-  const sdNames = new Set(sdList.map(f => f.n));
+  const sdFiles = sdList.filter(f => /\.(jpg|jpeg)$/i.test(f.n));
 
-  // Upload jika: nama belum ada di repo, ATAU nama sama tapi ukuran beda
-  // (index bekas hapus dipakai ulang oleh foto baru → isi file berubah)
-  const toUpload = sdList.filter(f => {
-    const r = repoFiles.get(f.n);
-    return !r || r.size !== f.s;
-  });
-  const toDelete = [...repoFiles.keys()]
-    .filter(n => /\.(jpg|jpeg)$/i.test(n) && !sdNames.has(n));
-  const total = toUpload.length + toDelete.length;
+  const total = repoFiles.size + sdFiles.length;
   let done = 0;
 
-  for (const f of toUpload) {
+  // 3. HAPUS semua dataset lama di repo (bersih total)
+  for (const [name, sha] of repoFiles) {
+    const del = await gh('/contents/dataset/' + encodeURIComponent(name), {
+      method: 'DELETE',
+      body: JSON.stringify({
+        message: 'dataset: bersihkan ' + name, sha, branch: ghCfg.branch,
+      }),
+    });
+    if (!del.ok && del.status !== 404)
+      throw new Error('Hapus ' + name + ' gagal (' + del.status + ')');
+    done++;
+    setStep('step-sync', 'active', done + '/' + total);
+    trainStatus('Bersihkan repo: ' + name + ' (' + done + '/' + total + ')',
+                Math.round(done / total * 100));
+  }
+
+  // 4. UPLOAD ULANG semua file SD (file baru → tanpa sha, tak mungkin conflict)
+  for (const f of sdFiles) {
     const img = await espFetch('/sd/file?name=' + encodeURIComponent(f.n));
     if (!img.ok) throw new Error('Gagal baca ' + f.n + ' dari SD');
     const b64 = await blobToBase64(await img.blob());
 
-    const body = {
-      message: 'dataset: tambah/update ' + f.n,
-      content: b64,
-      branch:  ghCfg.branch,
-    };
-    const prev = repoFiles.get(f.n);
-    if (prev) body.sha = prev.sha;   // update file lama (nama dipakai ulang)
-
     const put = await gh('/contents/dataset/' + encodeURIComponent(f.n), {
       method: 'PUT',
-      body: JSON.stringify(body),
+      body: JSON.stringify({
+        message: 'dataset: ' + f.n, content: b64, branch: ghCfg.branch,
+      }),
     });
     if (!put.ok) throw new Error('Upload ' + f.n + ' gagal (' + put.status + ')');
-
     done++;
     setStep('step-sync', 'active', done + '/' + total);
     trainStatus('Upload ' + f.n + ' (' + done + '/' + total + ')',
                 Math.round(done / total * 100));
   }
 
-  for (const n of toDelete) {
-    const del = await gh('/contents/dataset/' + encodeURIComponent(n), {
-      method: 'DELETE',
-      body: JSON.stringify({
-        message: 'dataset: hapus ' + n + ' (tidak ada lagi di SD)',
-        sha:     repoFiles.get(n),
-        branch:  ghCfg.branch,
-      }),
-    });
-    if (!del.ok) throw new Error('Hapus ' + n + ' di repo gagal (' + del.status + ')');
-
-    done++;
-    setStep('step-sync', 'active', done + '/' + total);
-    trainStatus('Hapus ' + n + ' dari repo (' + done + '/' + total + ')',
-                Math.round(done / total * 100));
-  }
-
-  return { uploaded: toUpload.length, deleted: toDelete.length };
+  return { uploaded: sdFiles.length, deleted: repoFiles.size };
 }
 
 // ─── Step 2: trigger workflow + tunggu selesai ───────────────
