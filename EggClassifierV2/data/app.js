@@ -687,9 +687,11 @@ const WORKFLOW = 'train.yml';
 // Repo target — terisi tetap, tidak perlu form pengaturan
 const ghCfg = { owner: 'Keyzoo0', repo: 'EggClassifier', branch: 'main' };
 
-// Token TIDAK ditanam di kode: token yang ter-push ke repo otomatis
-// dicabut GitHub (secret scanning). Diminta sekali via popup → localStorage.
-let ghToken = localStorage.getItem('gh_token') || '';
+// Token diambil dari secrets.js (window.GH_TOKEN) bila ada → user TAK perlu isi.
+// secrets.js di-GITIGNORE: tak pernah ter-push ke repo publik (token di repo
+// publik = dicabut otomatis GitHub secret-scanning). Fallback: prompt+localStorage
+// bila secrets.js tak ada (mis. clone bersih).
+let ghToken = (window.GH_TOKEN || '').trim() || localStorage.getItem('gh_token') || '';
 
 function ensureToken(forceAsk) {
   if (ghToken && !forceAsk) return true;

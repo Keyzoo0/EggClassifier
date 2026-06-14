@@ -455,6 +455,9 @@
      class="fixed bottom-5 right-4 left-4 flex flex-col items-end gap-2 z-50 pointer-events-none">
 </div>
 
+<!-- Token GitHub (window.GH_TOKEN) — file di-gitignore, tak ada di repo publik.
+     404 tak masalah bila tak ada → app.js fallback ke prompt. Harus sebelum app.js. -->
+<script src="/secrets.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

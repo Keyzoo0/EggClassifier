@@ -57,3 +57,6 @@ training/models/
 
 # Salinan manual web UI (bukan sumber kebenaran)
 EggClassifierV2/backup/
+
+# Kredensial — JANGAN commit (token GitHub)
+EggClassifierV2/data/secrets.js
