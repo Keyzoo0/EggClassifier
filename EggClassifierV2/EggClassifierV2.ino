@@ -337,13 +337,36 @@ bool initCamera() {
     Serial.println("[ERROR] Camera init gagal");
     return false;
   }
+  // Default pengaturan sensor (sesuai setting pilihan user). loadCameraSettings()
+  // tetap menimpa dengan NVS bila user mengubah via web; /camera/reset (hapus
+  // NVS) mengembalikan ke default ini, bukan default pabrik OV2640.
   sensor_t* s = esp_camera_sensor_get();
   if (s) {
-    s->set_brightness(s, 1);
-    s->set_contrast(s, 1);
-    s->set_awb_gain(s, 1);
+    s->set_quality(s, 40);                   // Kualitas JPEG (kecil=lebih bagus)
+    s->set_brightness(s, 0);
+    s->set_contrast(s, 0);
+    s->set_saturation(s, 0);
+    s->set_special_effect(s, 0);             // Normal
+    s->set_whitebal(s, 1);                   // Auto White Balance ON
+    s->set_awb_gain(s, 1);                   // AWB Gain ON
+    s->set_wb_mode(s, 0);                    // Mode WB: Auto
+    s->set_exposure_ctrl(s, 1);              // Auto Exposure (AEC) ON
+    s->set_aec2(s, 0);                       // AEC DSP (night mode) OFF
+    s->set_ae_level(s, -2);                  // AE Level -2
+    s->set_aec_value(s, 0);
+    s->set_gain_ctrl(s, 1);                  // Auto Gain (AGC) ON
+    s->set_agc_gain(s, 0);
+    s->set_gainceiling(s, GAINCEILING_2X);   // Gain Ceiling 2x
+    s->set_bpc(s, 1);                        // Black Pixel Correction ON
+    s->set_wpc(s, 1);                        // White Pixel Correction ON
+    s->set_raw_gma(s, 1);                    // Gamma ON
+    s->set_lenc(s, 1);                       // Koreksi Lensa ON
+    s->set_hmirror(s, 0);                    // Mirror OFF
+    s->set_vflip(s, 0);                      // Flip OFF
+    s->set_dcw(s, 1);                        // Downsize ON
+    s->set_colorbar(s, 0);                   // Color Bar OFF
   }
-  Serial.println("[OK] Camera: VGA 640×480 JPEG q6 double-buffer PSRAM");
+  Serial.println("[OK] Camera: VGA 640×480 default q40 double-buffer PSRAM");
   return true;
 }
 
